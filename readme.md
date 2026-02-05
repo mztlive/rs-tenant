@@ -392,6 +392,7 @@ let scope = engine.scope(tenant, user, ResourceName::try_from("invoice")?)?;
 - serde：为 ID 与 Permission 提供序列化支持
 - casbin：启用 Casbin 适配引擎
 - memory-store：提供内存实现
+- memory-cache：提供内存缓存实现
 
 ## 设计确认点
 

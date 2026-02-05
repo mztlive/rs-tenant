@@ -4,3 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+thiserror = "2.0.18"
+async-trait = "0.1"
+
+[dev-dependencies]
+futures = "0.3"
+
+[features]
+default = []
+serde = ["dep:serde"]
+memory-store = []
+casbin = []
+memory-cache = []
