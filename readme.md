@@ -393,6 +393,8 @@ let scope = engine.scope(tenant, user, ResourceName::try_from("invoice")?)?;
 - casbin：启用 Casbin 适配引擎
 - memory-store：提供内存实现
 - memory-cache：提供内存缓存实现
+- axum：提供 Axum 集成（中间件）
+- axum-jwt：提供 JWT 解析与 AuthContext extractor（依赖 axum + jsonwebtoken + serde）
 
 ## 设计确认点
 
@@ -431,3 +433,7 @@ let scope = engine.scope(tenant, user, ResourceName::try_from("invoice")?)?;
 ## 开发与测试
 
 - 运行测试：`cargo test`
+
+## 文档
+
+- DDD + Axum 接入指南：`docs/axum_ddd_integration.md`

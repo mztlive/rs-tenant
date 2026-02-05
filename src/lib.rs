@@ -45,6 +45,9 @@ mod memory_cache;
 #[cfg(feature = "memory-store")]
 mod memory_store;
 
+#[cfg(feature = "axum")]
+pub mod axum;
+
 pub use crate::cache::{Cache, NoCache};
 pub use crate::engine::{Decision, Engine, EngineBuilder, Scope};
 pub use crate::error::{Error, Result, StoreError};

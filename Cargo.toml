@@ -7,6 +7,10 @@ edition = "2024"
 serde = { version = "1", features = ["derive"], optional = true }
 thiserror = "2.0.18"
 async-trait = "0.1"
+axum = { version = "0.7", optional = true }
+http = { version = "1", optional = true }
+jsonwebtoken = { version = "9", optional = true }
+tower = { version = "0.5", optional = true }
 
 [dev-dependencies]
 futures = "0.3"
@@ -17,3 +21,5 @@ serde = ["dep:serde"]
 memory-store = []
 casbin = []
 memory-cache = []
+axum = ["dep:axum", "dep:http", "dep:tower"]
+axum-jwt = ["axum", "dep:jsonwebtoken", "serde"]
