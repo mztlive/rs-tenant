@@ -433,6 +433,9 @@ let scope = engine.scope(tenant, user, ResourceName::try_from("invoice")?)?;
 ## 开发与测试
 
 - 运行测试：`cargo test`
+- 手动性能基准（release）：`cargo test --release --features memory-store,memory-cache --test perf -- --ignored --nocapture`
+- Criterion 参数化基准：
+  `cargo bench --features criterion-bench,memory-store,memory-cache --bench criterion_engine`
 
 ## 文档
 

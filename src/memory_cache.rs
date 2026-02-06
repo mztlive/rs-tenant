@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -8,18 +9,23 @@ use crate::cache::Cache;
 use crate::permission::Permission;
 use crate::types::{PrincipalId, RoleId, TenantId};
 
+const SMALL_CACHE_SHARD_THRESHOLD: usize = 128;
+const MAX_DEFAULT_SHARDS: usize = 16;
+
 /// In-memory cache for effective permissions.
 ///
-/// This is a simple LRU cache with optional TTL. It is intended for tests
-/// and small deployments where a process-local cache is sufficient.
+/// This cache uses sharded locking to reduce contention in concurrent workloads.
+/// Each shard maintains its own LRU queue and TTL checks.
 #[derive(Debug, Clone)]
 pub struct MemoryCache {
-    inner: Arc<Mutex<CacheState>>,
+    shards: Arc<Vec<Mutex<CacheState>>>,
+    shard_capacities: Arc<Vec<usize>>,
+    shard_count: usize,
     capacity: usize,
     ttl: Option<Duration>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct CacheState {
     entries: HashMap<CacheKey, CacheEntry>,
     order: VecDeque<CacheKey>,
@@ -42,20 +48,73 @@ impl MemoryCache {
     ///
     /// A capacity of zero disables caching.
     pub fn new(capacity: usize) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(CacheState {
-                entries: HashMap::new(),
-                order: VecDeque::new(),
-            })),
-            capacity,
-            ttl: None,
-        }
+        let shard_count = Self::default_shard_count(capacity);
+        Self::build(capacity, shard_count)
+    }
+
+    /// Overrides shard count for lock sharding.
+    ///
+    /// This is useful for benchmarks and tuning. For small capacities we suggest
+    /// keeping one shard to preserve strict global LRU behavior.
+    pub fn with_shards(mut self, shards: usize) -> Self {
+        let shard_count = Self::normalize_shard_count(self.capacity, shards);
+        self.shards = Arc::new(Self::new_shards(shard_count));
+        self.shard_capacities = Arc::new(Self::distribute_capacity(self.capacity, shard_count));
+        self.shard_count = shard_count;
+        self
     }
 
     /// Configures a time-to-live for cache entries.
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
+    }
+
+    fn build(capacity: usize, shard_count: usize) -> Self {
+        Self {
+            shards: Arc::new(Self::new_shards(shard_count)),
+            shard_capacities: Arc::new(Self::distribute_capacity(capacity, shard_count)),
+            shard_count,
+            capacity,
+            ttl: None,
+        }
+    }
+
+    fn default_shard_count(capacity: usize) -> usize {
+        if capacity < SMALL_CACHE_SHARD_THRESHOLD {
+            return 1;
+        }
+        let cpu_shards = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(MAX_DEFAULT_SHARDS);
+        Self::normalize_shard_count(capacity, cpu_shards)
+    }
+
+    fn normalize_shard_count(capacity: usize, requested: usize) -> usize {
+        if capacity == 0 {
+            return 1;
+        }
+        requested.max(1).min(capacity)
+    }
+
+    fn new_shards(shard_count: usize) -> Vec<Mutex<CacheState>> {
+        (0..shard_count)
+            .map(|_| Mutex::new(CacheState::default()))
+            .collect()
+    }
+
+    fn distribute_capacity(capacity: usize, shard_count: usize) -> Vec<usize> {
+        if shard_count == 0 {
+            return Vec::new();
+        }
+
+        let base = capacity / shard_count;
+        let remainder = capacity % shard_count;
+
+        (0..shard_count)
+            .map(|idx| base + usize::from(idx < remainder))
+            .collect()
     }
 
     fn key(tenant: &TenantId, principal: &PrincipalId) -> CacheKey {
@@ -65,8 +124,14 @@ impl MemoryCache {
         }
     }
 
-    fn lock_state(&self) -> MutexGuard<'_, CacheState> {
-        match self.inner.lock() {
+    fn shard_index(&self, key: &CacheKey) -> usize {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) % self.shard_count
+    }
+
+    fn lock_shard(&self, shard_index: usize) -> MutexGuard<'_, CacheState> {
+        match self.shards[shard_index].lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
@@ -94,14 +159,14 @@ impl MemoryCache {
         state.order.retain(|key| state.entries.contains_key(key));
     }
 
-    fn evict_if_needed(state: &mut CacheState, capacity: usize) {
-        if capacity == 0 {
+    fn evict_if_needed(state: &mut CacheState, shard_capacity: usize) {
+        if shard_capacity == 0 {
             state.entries.clear();
             state.order.clear();
             return;
         }
 
-        while state.entries.len() > capacity {
+        while state.entries.len() > shard_capacity {
             if let Some(key) = state.order.pop_front() {
                 state.entries.remove(&key);
             } else {
@@ -136,7 +201,8 @@ impl Cache for MemoryCache {
 
         let key = Self::key(tenant, principal);
         let now = Instant::now();
-        let mut guard = self.lock_state();
+        let shard_index = self.shard_index(&key);
+        let mut guard = self.lock_shard(shard_index);
 
         if let Some(ttl) = self.ttl
             && let Some(entry) = guard.entries.get(&key)
@@ -165,7 +231,8 @@ impl Cache for MemoryCache {
 
         let key = Self::key(tenant, principal);
         let now = Instant::now();
-        let mut guard = self.lock_state();
+        let shard_index = self.shard_index(&key);
+        let mut guard = self.lock_shard(shard_index);
 
         if let Some(ttl) = self.ttl {
             Self::prune_expired(&mut guard, ttl, now);
@@ -179,24 +246,30 @@ impl Cache for MemoryCache {
             },
         );
         Self::touch(&mut guard, &key);
-        Self::evict_if_needed(&mut guard, self.capacity);
+        let shard_capacity = self.shard_capacities[shard_index];
+        Self::evict_if_needed(&mut guard, shard_capacity);
     }
 
     async fn invalidate_principal(&self, tenant: &TenantId, principal: &PrincipalId) {
         let key = Self::key(tenant, principal);
-        let mut guard = self.lock_state();
+        let shard_index = self.shard_index(&key);
+        let mut guard = self.lock_shard(shard_index);
         Self::remove_key(&mut guard, &key);
     }
 
     async fn invalidate_role(&self, tenant: &TenantId, _role: &RoleId) {
         // Role-to-principal relationships are unknown here, so we invalidate the tenant scope.
-        let mut guard = self.lock_state();
-        Self::invalidate_tenant_inner(&mut guard, tenant);
+        for shard_index in 0..self.shard_count {
+            let mut guard = self.lock_shard(shard_index);
+            Self::invalidate_tenant_inner(&mut guard, tenant);
+        }
     }
 
     async fn invalidate_tenant(&self, tenant: &TenantId) {
-        let mut guard = self.lock_state();
-        Self::invalidate_tenant_inner(&mut guard, tenant);
+        for shard_index in 0..self.shard_count {
+            let mut guard = self.lock_shard(shard_index);
+            Self::invalidate_tenant_inner(&mut guard, tenant);
+        }
     }
 }
 
@@ -265,9 +338,9 @@ mod tests {
     #[test]
     fn cache_should_recover_from_poisoned_lock() {
         let cache = MemoryCache::new(1);
-        let inner = cache.inner.clone();
+        let shards = Arc::clone(&cache.shards);
         let _ = std::thread::spawn(move || {
-            let _guard = inner.lock().unwrap();
+            let _guard = shards[0].lock().unwrap();
             panic!("poison cache lock");
         })
         .join();
@@ -277,5 +350,12 @@ mod tests {
         block_on(cache.set_permissions(&tenant, &principal, vec![perm("invoice:read")]));
 
         assert!(block_on(cache.get_permissions(&tenant, &principal)).is_some());
+    }
+
+    #[test]
+    fn with_shards_should_enable_sharding_for_large_cache() {
+        let cache = MemoryCache::new(1024).with_shards(8);
+        assert_eq!(cache.shard_count, 8);
+        assert_eq!(cache.shard_capacities.iter().sum::<usize>(), 1024);
     }
 }
