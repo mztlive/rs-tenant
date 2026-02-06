@@ -82,15 +82,13 @@ fn bench_flat(c: &mut Criterion) {
     group.bench_function("authorize_no_cache", |b| {
         b.iter(|| {
             let decision =
-                block_on(engine.authorize(tenant.clone(), principal.clone(), permission.clone()))
-                    .unwrap();
+                block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
             black_box(decision);
         });
     });
     group.bench_function("scope_no_cache", |b| {
         b.iter(|| {
-            let scope = block_on(engine.scope(tenant.clone(), principal.clone(), resource.clone()))
-                .unwrap();
+            let scope = block_on(engine.scope_ref(&tenant, &principal, &resource)).unwrap();
             black_box(scope);
         });
     });
@@ -101,21 +99,19 @@ fn bench_flat(c: &mut Criterion) {
         .with_ttl(Duration::from_secs(60));
     let engine = EngineBuilder::new(store).cache(cache).build();
     assert_eq!(
-        block_on(engine.authorize(tenant.clone(), principal.clone(), permission.clone())).unwrap(),
+        block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap(),
         Decision::Allow
     );
     group.bench_function("authorize_cache_single_shard", |b| {
         b.iter(|| {
             let decision =
-                block_on(engine.authorize(tenant.clone(), principal.clone(), permission.clone()))
-                    .unwrap();
+                block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
             black_box(decision);
         });
     });
     group.bench_function("scope_cache_single_shard", |b| {
         b.iter(|| {
-            let scope = block_on(engine.scope(tenant.clone(), principal.clone(), resource.clone()))
-                .unwrap();
+            let scope = block_on(engine.scope_ref(&tenant, &principal, &resource)).unwrap();
             black_box(scope);
         });
     });
@@ -126,21 +122,19 @@ fn bench_flat(c: &mut Criterion) {
         .with_ttl(Duration::from_secs(60));
     let engine = EngineBuilder::new(store).cache(cache).build();
     assert_eq!(
-        block_on(engine.authorize(tenant.clone(), principal.clone(), permission.clone())).unwrap(),
+        block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap(),
         Decision::Allow
     );
     group.bench_function("authorize_cache_sharded", |b| {
         b.iter(|| {
             let decision =
-                block_on(engine.authorize(tenant.clone(), principal.clone(), permission.clone()))
-                    .unwrap();
+                block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
             black_box(decision);
         });
     });
     group.bench_function("scope_cache_sharded", |b| {
         b.iter(|| {
-            let scope = block_on(engine.scope(tenant.clone(), principal.clone(), resource.clone()))
-                .unwrap();
+            let scope = block_on(engine.scope_ref(&tenant, &principal, &resource)).unwrap();
             black_box(scope);
         });
     });
@@ -162,12 +156,8 @@ fn bench_hierarchy_depth(c: &mut Criterion) {
         let id = BenchmarkId::from_parameter(depth);
         group.bench_with_input(id, &depth, |b, _| {
             b.iter(|| {
-                let decision = block_on(engine.authorize(
-                    tenant.clone(),
-                    principal.clone(),
-                    permission.clone(),
-                ))
-                .unwrap();
+                let decision =
+                    block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
                 black_box(decision);
             });
         });
@@ -189,8 +179,7 @@ fn bench_role_fanout(c: &mut Criterion) {
         group.bench_with_input(id, &role_count, |b, _| {
             b.iter(|| {
                 let decision =
-                    block_on(engine.authorize(tenant.clone(), principal.clone(), required.clone()))
-                        .unwrap();
+                    block_on(engine.authorize_ref(&tenant, &principal, &required)).unwrap();
                 black_box(decision);
             });
         });
@@ -213,14 +202,13 @@ fn bench_scope(c: &mut Criterion) {
         )
         .build();
     assert_eq!(
-        block_on(engine.authorize(tenant.clone(), principal.clone(), permission.clone())).unwrap(),
+        block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap(),
         Decision::Allow
     );
 
     group.bench_function("scope_allow", |b| {
         b.iter(|| {
-            let scope = block_on(engine.scope(tenant.clone(), principal.clone(), resource.clone()))
-                .unwrap();
+            let scope = block_on(engine.scope_ref(&tenant, &principal, &resource)).unwrap();
             black_box(scope);
         });
     });
@@ -228,9 +216,7 @@ fn bench_scope(c: &mut Criterion) {
     let denied_resource = ResourceName::try_from("customer").unwrap();
     group.bench_function("scope_deny", |b| {
         b.iter(|| {
-            let scope =
-                block_on(engine.scope(tenant.clone(), principal.clone(), denied_resource.clone()))
-                    .unwrap();
+            let scope = block_on(engine.scope_ref(&tenant, &principal, &denied_resource)).unwrap();
             assert!(matches!(scope, Scope::None));
             black_box(scope);
         });

@@ -94,7 +94,7 @@ where
             };
 
             match engine
-                .authorize(context.tenant, context.principal, permission)
+                .authorize_ref(&context.tenant, &context.principal, &permission)
                 .await
             {
                 Ok(Decision::Allow) => {

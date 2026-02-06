@@ -132,9 +132,19 @@ where
         principal: PrincipalId,
         permission: Permission,
     ) -> Result<Decision> {
+        self.authorize_ref(&tenant, &principal, &permission).await
+    }
+
+    /// Authorizes a principal for a permission within a tenant.
+    pub async fn authorize_ref(
+        &self,
+        tenant: &TenantId,
+        principal: &PrincipalId,
+        permission: &Permission,
+    ) -> Result<Decision> {
         if !self
             .store
-            .tenant_active(tenant.clone())
+            .tenant_active_ref(tenant)
             .await
             .map_err(Error::from)?
         {
@@ -142,18 +152,18 @@ where
         }
         if !self
             .store
-            .principal_active(tenant.clone(), principal.clone())
+            .principal_active_ref(tenant, principal)
             .await
             .map_err(Error::from)?
         {
             return Ok(Decision::Deny);
         }
 
-        let permissions = self.effective_permissions(&tenant, &principal).await?;
+        let permissions = self.effective_permissions(tenant, principal).await?;
         let allowed = permissions.iter().any(|granted| {
             permission_matches(
                 granted,
-                &permission,
+                permission,
                 self.enable_wildcard,
                 self.permission_normalize,
             )
@@ -173,9 +183,19 @@ where
         principal: PrincipalId,
         resource: ResourceName,
     ) -> Result<Scope> {
+        self.scope_ref(&tenant, &principal, &resource).await
+    }
+
+    /// Computes scope for a resource within a tenant.
+    pub async fn scope_ref(
+        &self,
+        tenant: &TenantId,
+        principal: &PrincipalId,
+        resource: &ResourceName,
+    ) -> Result<Scope> {
         if !self
             .store
-            .tenant_active(tenant.clone())
+            .tenant_active_ref(tenant)
             .await
             .map_err(Error::from)?
         {
@@ -183,25 +203,27 @@ where
         }
         if !self
             .store
-            .principal_active(tenant.clone(), principal.clone())
+            .principal_active_ref(tenant, principal)
             .await
             .map_err(Error::from)?
         {
             return Ok(Scope::None);
         }
 
-        let permissions = self.effective_permissions(&tenant, &principal).await?;
+        let permissions = self.effective_permissions(tenant, principal).await?;
         let allowed = permissions.iter().any(|granted| {
             resource_matches(
                 granted,
-                &resource,
+                resource,
                 self.enable_wildcard,
                 self.permission_normalize,
             )
         });
 
         Ok(if allowed {
-            Scope::TenantOnly { tenant }
+            Scope::TenantOnly {
+                tenant: tenant.clone(),
+            }
         } else {
             Scope::None
         })
@@ -220,7 +242,7 @@ where
 
         let direct_roles = self
             .store
-            .principal_roles(tenant.clone(), principal.clone())
+            .principal_roles_ref(tenant, principal)
             .await
             .map_err(Error::from)?;
         let roles = if self.enable_role_hierarchy {
@@ -233,7 +255,7 @@ where
         for role in roles {
             let role_permissions = self
                 .store
-                .role_permissions(tenant.clone(), role)
+                .role_permissions_ref(tenant, &role)
                 .await
                 .map_err(Error::from)?;
             permissions.extend(role_permissions);
@@ -241,13 +263,13 @@ where
 
         let global_roles = self
             .store
-            .global_roles(principal.clone())
+            .global_roles_ref(principal)
             .await
             .map_err(Error::from)?;
         for role in global_roles {
             let global_permissions = self
                 .store
-                .global_role_permissions(role)
+                .global_role_permissions_ref(&role)
                 .await
                 .map_err(Error::from)?;
             permissions.extend(global_permissions);
@@ -301,7 +323,7 @@ where
     ) -> Result<()> {
         let parents = self
             .store
-            .role_inherits(tenant.clone(), role.clone())
+            .role_inherits_ref(tenant, &role)
             .await
             .map_err(Error::from)?;
         visiting.insert(role.clone());
@@ -334,7 +356,7 @@ where
 
                 let parents = self
                     .store
-                    .role_inherits(tenant.clone(), parent.clone())
+                    .role_inherits_ref(tenant, &parent)
                     .await
                     .map_err(Error::from)?;
                 visiting.insert(parent.clone());

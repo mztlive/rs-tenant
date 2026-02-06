@@ -14,10 +14,10 @@ pub struct MemoryStore {
 #[derive(Debug, Default)]
 struct Inner {
     tenants: RwLock<HashMap<TenantId, bool>>,
-    principals: RwLock<HashMap<(TenantId, PrincipalId), bool>>,
-    principal_roles: RwLock<HashMap<(TenantId, PrincipalId), HashSet<RoleId>>>,
-    role_permissions: RwLock<HashMap<(TenantId, RoleId), HashSet<Permission>>>,
-    role_inherits: RwLock<HashMap<(TenantId, RoleId), HashSet<RoleId>>>,
+    principals: RwLock<HashMap<TenantId, HashMap<PrincipalId, bool>>>,
+    principal_roles: RwLock<HashMap<TenantId, HashMap<PrincipalId, HashSet<RoleId>>>>,
+    role_permissions: RwLock<HashMap<TenantId, HashMap<RoleId, HashSet<Permission>>>>,
+    role_inherits: RwLock<HashMap<TenantId, HashMap<RoleId, HashSet<RoleId>>>>,
     global_roles: RwLock<HashMap<PrincipalId, HashSet<GlobalRoleId>>>,
     global_role_permissions: RwLock<HashMap<GlobalRoleId, HashSet<Permission>>>,
 }
@@ -51,25 +51,40 @@ impl MemoryStore {
     /// Sets principal active status within a tenant.
     pub fn set_principal_active(&self, tenant: TenantId, principal: PrincipalId, active: bool) {
         let mut guard = write_guard(&self.inner.principals);
-        guard.insert((tenant, principal), active);
+        guard.entry(tenant).or_default().insert(principal, active);
     }
 
     /// Adds a role to a principal.
     pub fn add_principal_role(&self, tenant: TenantId, principal: PrincipalId, role: RoleId) {
         let mut guard = write_guard(&self.inner.principal_roles);
-        guard.entry((tenant, principal)).or_default().insert(role);
+        guard
+            .entry(tenant)
+            .or_default()
+            .entry(principal)
+            .or_default()
+            .insert(role);
     }
 
     /// Adds a permission to a role.
     pub fn add_role_permission(&self, tenant: TenantId, role: RoleId, permission: Permission) {
         let mut guard = write_guard(&self.inner.role_permissions);
-        guard.entry((tenant, role)).or_default().insert(permission);
+        guard
+            .entry(tenant)
+            .or_default()
+            .entry(role)
+            .or_default()
+            .insert(permission);
     }
 
     /// Adds an inheritance edge for a role.
     pub fn add_role_inherit(&self, tenant: TenantId, role: RoleId, parent: RoleId) {
         let mut guard = write_guard(&self.inner.role_inherits);
-        guard.entry((tenant, role)).or_default().insert(parent);
+        guard
+            .entry(tenant)
+            .or_default()
+            .entry(role)
+            .or_default()
+            .insert(parent);
     }
 
     /// Adds a global role to a principal.
@@ -91,8 +106,15 @@ impl TenantStore for MemoryStore {
         &self,
         tenant: TenantId,
     ) -> std::result::Result<bool, crate::StoreError> {
+        self.tenant_active_ref(&tenant).await
+    }
+
+    async fn tenant_active_ref(
+        &self,
+        tenant: &TenantId,
+    ) -> std::result::Result<bool, crate::StoreError> {
         let guard = read_guard(&self.inner.tenants);
-        Ok(guard.get(&tenant).copied().unwrap_or(false))
+        Ok(guard.get(tenant).copied().unwrap_or(false))
     }
 
     async fn principal_active(
@@ -100,8 +122,20 @@ impl TenantStore for MemoryStore {
         tenant: TenantId,
         principal: PrincipalId,
     ) -> std::result::Result<bool, crate::StoreError> {
+        self.principal_active_ref(&tenant, &principal).await
+    }
+
+    async fn principal_active_ref(
+        &self,
+        tenant: &TenantId,
+        principal: &PrincipalId,
+    ) -> std::result::Result<bool, crate::StoreError> {
         let guard = read_guard(&self.inner.principals);
-        Ok(guard.get(&(tenant, principal)).copied().unwrap_or(false))
+        Ok(guard
+            .get(tenant)
+            .and_then(|principals| principals.get(principal))
+            .copied()
+            .unwrap_or(false))
     }
 }
 
@@ -112,9 +146,18 @@ impl RoleStore for MemoryStore {
         tenant: TenantId,
         principal: PrincipalId,
     ) -> std::result::Result<Vec<RoleId>, crate::StoreError> {
+        self.principal_roles_ref(&tenant, &principal).await
+    }
+
+    async fn principal_roles_ref(
+        &self,
+        tenant: &TenantId,
+        principal: &PrincipalId,
+    ) -> std::result::Result<Vec<RoleId>, crate::StoreError> {
         let guard = read_guard(&self.inner.principal_roles);
         Ok(guard
-            .get(&(tenant, principal))
+            .get(tenant)
+            .and_then(|principal_roles| principal_roles.get(principal))
             .map(|roles| roles.iter().cloned().collect())
             .unwrap_or_default())
     }
@@ -124,9 +167,18 @@ impl RoleStore for MemoryStore {
         tenant: TenantId,
         role: RoleId,
     ) -> std::result::Result<Vec<Permission>, crate::StoreError> {
+        self.role_permissions_ref(&tenant, &role).await
+    }
+
+    async fn role_permissions_ref(
+        &self,
+        tenant: &TenantId,
+        role: &RoleId,
+    ) -> std::result::Result<Vec<Permission>, crate::StoreError> {
         let guard = read_guard(&self.inner.role_permissions);
         Ok(guard
-            .get(&(tenant, role))
+            .get(tenant)
+            .and_then(|role_permissions| role_permissions.get(role))
             .map(|perms| perms.iter().cloned().collect())
             .unwrap_or_default())
     }
@@ -136,9 +188,18 @@ impl RoleStore for MemoryStore {
         tenant: TenantId,
         role: RoleId,
     ) -> std::result::Result<Vec<RoleId>, crate::StoreError> {
+        self.role_inherits_ref(&tenant, &role).await
+    }
+
+    async fn role_inherits_ref(
+        &self,
+        tenant: &TenantId,
+        role: &RoleId,
+    ) -> std::result::Result<Vec<RoleId>, crate::StoreError> {
         let guard = read_guard(&self.inner.role_inherits);
         Ok(guard
-            .get(&(tenant, role))
+            .get(tenant)
+            .and_then(|inherits| inherits.get(role))
             .map(|roles| roles.iter().cloned().collect())
             .unwrap_or_default())
     }
@@ -150,9 +211,16 @@ impl GlobalRoleStore for MemoryStore {
         &self,
         principal: PrincipalId,
     ) -> std::result::Result<Vec<GlobalRoleId>, crate::StoreError> {
+        self.global_roles_ref(&principal).await
+    }
+
+    async fn global_roles_ref(
+        &self,
+        principal: &PrincipalId,
+    ) -> std::result::Result<Vec<GlobalRoleId>, crate::StoreError> {
         let guard = read_guard(&self.inner.global_roles);
         Ok(guard
-            .get(&principal)
+            .get(principal)
             .map(|roles| roles.iter().cloned().collect())
             .unwrap_or_default())
     }
@@ -161,9 +229,16 @@ impl GlobalRoleStore for MemoryStore {
         &self,
         role: GlobalRoleId,
     ) -> std::result::Result<Vec<Permission>, crate::StoreError> {
+        self.global_role_permissions_ref(&role).await
+    }
+
+    async fn global_role_permissions_ref(
+        &self,
+        role: &GlobalRoleId,
+    ) -> std::result::Result<Vec<Permission>, crate::StoreError> {
         let guard = read_guard(&self.inner.global_role_permissions);
         Ok(guard
-            .get(&role)
+            .get(role)
             .map(|perms| perms.iter().cloned().collect())
             .unwrap_or_default())
     }

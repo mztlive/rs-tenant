@@ -131,9 +131,7 @@ fn perf_authorize_and_scope() {
     let (store, tenant, principal, permission, _resource) = setup_flat_store();
     let engine = EngineBuilder::new(store).build();
     benchmark_sync("authorize_flat_no_cache", iterations, || {
-        let result =
-            block_on(engine.authorize(tenant.clone(), principal.clone(), permission.clone()))
-                .unwrap();
+        let result = block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
         black_box(result);
     });
 
@@ -141,19 +139,15 @@ fn perf_authorize_and_scope() {
     let engine = EngineBuilder::new(store)
         .cache(MemoryCache::new(8_192).with_ttl(Duration::from_secs(60)))
         .build();
-    let warm =
-        block_on(engine.authorize(tenant.clone(), principal.clone(), permission.clone())).unwrap();
+    let warm = block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
     assert_eq!(warm, Decision::Allow);
     benchmark_sync("authorize_flat_hot_cache", iterations, || {
-        let result =
-            block_on(engine.authorize(tenant.clone(), principal.clone(), permission.clone()))
-                .unwrap();
+        let result = block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
         black_box(result);
     });
 
     benchmark_sync("scope_flat_hot_cache", iterations, || {
-        let result =
-            block_on(engine.scope(tenant.clone(), principal.clone(), resource.clone())).unwrap();
+        let result = block_on(engine.scope_ref(&tenant, &principal, &resource)).unwrap();
         black_box(result);
     });
 
@@ -166,9 +160,7 @@ fn perf_authorize_and_scope() {
         "authorize_hierarchy_depth8_no_cache",
         iterations / 4,
         || {
-            let result =
-                block_on(engine.authorize(tenant.clone(), principal.clone(), permission.clone()))
-                    .unwrap();
+            let result = block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
             black_box(result);
         },
     );
@@ -188,12 +180,8 @@ fn perf_authorize_and_scope() {
             )
             .build(),
     );
-    let warm = block_on(engine_single_shard.authorize(
-        tenant.clone(),
-        principal.clone(),
-        permission.clone(),
-    ))
-    .unwrap();
+    let warm =
+        block_on(engine_single_shard.authorize_ref(&tenant, &principal, &permission)).unwrap();
     assert_eq!(warm, Decision::Allow);
     let tenant_for_single_verify = tenant.clone();
     let principal_for_single_verify = principal.clone();
@@ -209,21 +197,18 @@ fn perf_authorize_and_scope() {
             let principal = principal.clone();
             let permission = permission.clone();
             Box::new(move || {
-                let result = block_on(engine.authorize(
-                    tenant.clone(),
-                    principal.clone(),
-                    permission.clone(),
-                ))
-                .unwrap();
+                let result =
+                    block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
                 black_box(result);
             })
         },
     );
 
-    let scope = block_on(engine_single_shard.scope(
-        tenant_for_single_verify,
-        principal_for_single_verify,
-        ResourceName::try_from("invoice").unwrap(),
+    let verify_resource = ResourceName::try_from("invoice").unwrap();
+    let scope = block_on(engine_single_shard.scope_ref(
+        &tenant_for_single_verify,
+        &principal_for_single_verify,
+        &verify_resource,
     ))
     .unwrap();
     assert!(matches!(scope, Scope::TenantOnly { .. }));
@@ -239,9 +224,7 @@ fn perf_authorize_and_scope() {
             )
             .build(),
     );
-    let warm =
-        block_on(engine_sharded.authorize(tenant.clone(), principal.clone(), permission.clone()))
-            .unwrap();
+    let warm = block_on(engine_sharded.authorize_ref(&tenant, &principal, &permission)).unwrap();
     assert_eq!(warm, Decision::Allow);
 
     let engine_sharded_for_parallel = Arc::clone(&engine_sharded);
@@ -255,12 +238,8 @@ fn perf_authorize_and_scope() {
             let principal = principal.clone();
             let permission = permission.clone();
             Box::new(move || {
-                let result = block_on(engine.authorize(
-                    tenant.clone(),
-                    principal.clone(),
-                    permission.clone(),
-                ))
-                .unwrap();
+                let result =
+                    block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
                 black_box(result);
             })
         },
