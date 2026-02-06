@@ -33,6 +33,7 @@ pub struct Engine<S, C = NoCache> {
     cache_signature_marker: Permission,
     enable_role_hierarchy: bool,
     enable_wildcard: bool,
+    enable_super_admin: bool,
     max_inherit_depth: usize,
     permission_normalize: bool,
 }
@@ -43,6 +44,7 @@ pub struct EngineBuilder<S, C = NoCache> {
     cache: C,
     enable_role_hierarchy: bool,
     enable_wildcard: bool,
+    enable_super_admin: bool,
     max_inherit_depth: usize,
     permission_normalize: bool,
 }
@@ -55,6 +57,7 @@ impl<S> EngineBuilder<S, NoCache> {
             cache: NoCache,
             enable_role_hierarchy: false,
             enable_wildcard: false,
+            enable_super_admin: false,
             max_inherit_depth: 16,
             permission_normalize: true,
         }
@@ -71,6 +74,12 @@ impl<S, C> EngineBuilder<S, C> {
     /// Enables or disables wildcard permission matching.
     pub fn enable_wildcard(mut self, on: bool) -> Self {
         self.enable_wildcard = on;
+        self
+    }
+
+    /// Enables or disables super-admin short-circuit checks.
+    pub fn enable_super_admin(mut self, on: bool) -> Self {
+        self.enable_super_admin = on;
         self
     }
 
@@ -93,6 +102,7 @@ impl<S, C> EngineBuilder<S, C> {
             cache,
             enable_role_hierarchy: self.enable_role_hierarchy,
             enable_wildcard: self.enable_wildcard,
+            enable_super_admin: self.enable_super_admin,
             max_inherit_depth: self.max_inherit_depth,
             permission_normalize: self.permission_normalize,
         }
@@ -101,9 +111,10 @@ impl<S, C> EngineBuilder<S, C> {
     /// Builds the engine.
     pub fn build(self) -> Engine<S, C> {
         let cache_signature_marker = Permission::from_string(format!(
-            "{CACHE_SIGNATURE_PREFIX}rh:{};wc:{};depth:{};norm:{}",
+            "{CACHE_SIGNATURE_PREFIX}rh:{};wc:{};sa:{};depth:{};norm:{}",
             u8::from(self.enable_role_hierarchy),
             u8::from(self.enable_wildcard),
+            u8::from(self.enable_super_admin),
             self.max_inherit_depth,
             u8::from(self.permission_normalize),
         ));
@@ -114,6 +125,7 @@ impl<S, C> EngineBuilder<S, C> {
             cache_signature_marker,
             enable_role_hierarchy: self.enable_role_hierarchy,
             enable_wildcard: self.enable_wildcard,
+            enable_super_admin: self.enable_super_admin,
             max_inherit_depth: self.max_inherit_depth,
             permission_normalize: self.permission_normalize,
         }
@@ -142,20 +154,13 @@ where
         principal: &PrincipalId,
         permission: &Permission,
     ) -> Result<Decision> {
-        if !self
-            .store
-            .tenant_active_ref(tenant)
-            .await
-            .map_err(Error::from)?
-        {
+        if !self.store.tenant_active_ref(tenant).await? {
             return Ok(Decision::Deny);
         }
-        if !self
-            .store
-            .principal_active_ref(tenant, principal)
-            .await
-            .map_err(Error::from)?
-        {
+        if self.enable_super_admin && self.store.is_super_admin_ref(principal).await? {
+            return Ok(Decision::Allow);
+        }
+        if !self.store.principal_active_ref(tenant, principal).await? {
             return Ok(Decision::Deny);
         }
 
@@ -193,20 +198,15 @@ where
         principal: &PrincipalId,
         resource: &ResourceName,
     ) -> Result<Scope> {
-        if !self
-            .store
-            .tenant_active_ref(tenant)
-            .await
-            .map_err(Error::from)?
-        {
+        if !self.store.tenant_active_ref(tenant).await? {
             return Ok(Scope::None);
         }
-        if !self
-            .store
-            .principal_active_ref(tenant, principal)
-            .await
-            .map_err(Error::from)?
-        {
+        if self.enable_super_admin && self.store.is_super_admin_ref(principal).await? {
+            return Ok(Scope::TenantOnly {
+                tenant: tenant.clone(),
+            });
+        }
+        if !self.store.principal_active_ref(tenant, principal).await? {
             return Ok(Scope::None);
         }
 
@@ -240,11 +240,7 @@ where
             return Ok(perms);
         }
 
-        let direct_roles = self
-            .store
-            .principal_roles_ref(tenant, principal)
-            .await
-            .map_err(Error::from)?;
+        let direct_roles = self.store.principal_roles_ref(tenant, principal).await?;
         let roles = if self.enable_role_hierarchy {
             self.expand_roles(tenant, direct_roles).await?
         } else {
@@ -253,25 +249,13 @@ where
 
         let mut permissions = HashSet::new();
         for role in roles {
-            let role_permissions = self
-                .store
-                .role_permissions_ref(tenant, &role)
-                .await
-                .map_err(Error::from)?;
+            let role_permissions = self.store.role_permissions_ref(tenant, &role).await?;
             permissions.extend(role_permissions);
         }
 
-        let global_roles = self
-            .store
-            .global_roles_ref(principal)
-            .await
-            .map_err(Error::from)?;
+        let global_roles = self.store.global_roles_ref(principal).await?;
         for role in global_roles {
-            let global_permissions = self
-                .store
-                .global_role_permissions_ref(&role)
-                .await
-                .map_err(Error::from)?;
+            let global_permissions = self.store.global_role_permissions_ref(&role).await?;
             permissions.extend(global_permissions);
         }
 
@@ -321,11 +305,7 @@ where
         visiting: &mut HashSet<RoleId>,
         output: &mut Vec<RoleId>,
     ) -> Result<()> {
-        let parents = self
-            .store
-            .role_inherits_ref(tenant, &role)
-            .await
-            .map_err(Error::from)?;
+        let parents = self.store.role_inherits_ref(tenant, &role).await?;
         visiting.insert(role.clone());
         output.push(role.clone());
 
@@ -354,11 +334,7 @@ where
                     continue;
                 }
 
-                let parents = self
-                    .store
-                    .role_inherits_ref(tenant, &parent)
-                    .await
-                    .map_err(Error::from)?;
+                let parents = self.store.role_inherits_ref(tenant, &parent).await?;
                 visiting.insert(parent.clone());
                 output.push(parent.clone());
                 stack.push((parent, next_depth, parents.into_iter()));
@@ -387,6 +363,7 @@ mod tests {
     struct TestStore {
         tenant_active: bool,
         principal_active: bool,
+        super_admin: bool,
         roles: Vec<RoleId>,
         role_permissions: HashMap<RoleId, Vec<Permission>>,
         role_inherits: HashMap<RoleId, Vec<RoleId>>,
@@ -473,6 +450,13 @@ mod tests {
                 .get(&role)
                 .cloned()
                 .unwrap_or_default())
+        }
+
+        async fn is_super_admin(
+            &self,
+            _principal: PrincipalId,
+        ) -> std::result::Result<bool, crate::StoreError> {
+            Ok(self.super_admin)
         }
     }
 
@@ -646,6 +630,74 @@ mod tests {
         assert_eq!(scope, Scope::None);
     }
 
+    #[test]
+    fn super_admin_should_allow_when_enabled_without_permissions() {
+        let mut store = active_store();
+        store.super_admin = true;
+        store.principal_active = false;
+
+        let engine = EngineBuilder::new(store).enable_super_admin(true).build();
+        let decision = block_on(engine.authorize(
+            TenantId::try_from("tenant_1").unwrap(),
+            PrincipalId::try_from("user_1").unwrap(),
+            Permission::try_from("invoice:delete").unwrap(),
+        ))
+        .unwrap();
+
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn super_admin_should_not_allow_when_disabled() {
+        let mut store = active_store();
+        store.super_admin = true;
+        store.principal_active = false;
+
+        let engine = EngineBuilder::new(store).build();
+        let decision = block_on(engine.authorize(
+            TenantId::try_from("tenant_1").unwrap(),
+            PrincipalId::try_from("user_1").unwrap(),
+            Permission::try_from("invoice:delete").unwrap(),
+        ))
+        .unwrap();
+
+        assert_eq!(decision, Decision::Deny);
+    }
+
+    #[test]
+    fn super_admin_scope_should_return_tenant_only_when_enabled() {
+        let mut store = active_store();
+        store.super_admin = true;
+        store.principal_active = false;
+
+        let engine = EngineBuilder::new(store).enable_super_admin(true).build();
+        let scope = block_on(engine.scope(
+            TenantId::try_from("tenant_1").unwrap(),
+            PrincipalId::try_from("user_1").unwrap(),
+            ResourceName::try_from("customer").unwrap(),
+        ))
+        .unwrap();
+
+        assert!(matches!(scope, Scope::TenantOnly { .. }));
+    }
+
+    #[test]
+    fn super_admin_should_still_deny_when_tenant_inactive() {
+        let mut store = active_store();
+        store.super_admin = true;
+        store.tenant_active = false;
+
+        let engine = EngineBuilder::new(store).enable_super_admin(true).build();
+        let decision = block_on(engine.authorize(
+            TenantId::try_from("tenant_1").unwrap(),
+            PrincipalId::try_from("user_1").unwrap(),
+            Permission::try_from("invoice:delete").unwrap(),
+        ))
+        .unwrap();
+
+        assert_eq!(decision, Decision::Deny);
+    }
+
     #[cfg(feature = "memory-cache")]
     #[test]
     fn shared_cache_should_isolate_different_engine_configs() {
@@ -675,6 +727,36 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(wildcard_decision, Decision::Allow);
+
+        let strict_decision =
+            block_on(strict_engine.authorize(tenant, principal, required)).unwrap();
+        assert_eq!(strict_decision, Decision::Deny);
+    }
+
+    #[cfg(feature = "memory-cache")]
+    #[test]
+    fn shared_cache_should_isolate_super_admin_flag() {
+        let mut store = active_store();
+        store.super_admin = true;
+
+        let cache = crate::MemoryCache::new(8);
+        let super_admin_engine = EngineBuilder::new(store.clone())
+            .enable_super_admin(true)
+            .cache(cache.clone())
+            .build();
+        let strict_engine = EngineBuilder::new(store).cache(cache).build();
+
+        let tenant = TenantId::try_from("tenant_1").unwrap();
+        let principal = PrincipalId::try_from("user_1").unwrap();
+        let required = Permission::try_from("invoice:delete").unwrap();
+
+        let super_admin_decision = block_on(super_admin_engine.authorize(
+            tenant.clone(),
+            principal.clone(),
+            required.clone(),
+        ))
+        .unwrap();
+        assert_eq!(super_admin_decision, Decision::Allow);
 
         let strict_decision =
             block_on(strict_engine.authorize(tenant, principal, required)).unwrap();

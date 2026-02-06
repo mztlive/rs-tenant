@@ -18,6 +18,7 @@ struct Inner {
     principal_roles: RwLock<HashMap<TenantId, HashMap<PrincipalId, HashSet<RoleId>>>>,
     role_permissions: RwLock<HashMap<TenantId, HashMap<RoleId, HashSet<Permission>>>>,
     role_inherits: RwLock<HashMap<TenantId, HashMap<RoleId, HashSet<RoleId>>>>,
+    super_admins: RwLock<HashSet<PrincipalId>>,
     global_roles: RwLock<HashMap<PrincipalId, HashSet<GlobalRoleId>>>,
     global_role_permissions: RwLock<HashMap<GlobalRoleId, HashSet<Permission>>>,
 }
@@ -97,6 +98,18 @@ impl MemoryStore {
     pub fn add_global_role_permission(&self, role: GlobalRoleId, permission: Permission) {
         let mut guard = write_guard(&self.inner.global_role_permissions);
         guard.entry(role).or_default().insert(permission);
+    }
+
+    /// Marks a principal as platform-level super administrator.
+    pub fn add_super_admin(&self, principal: PrincipalId) {
+        let mut guard = write_guard(&self.inner.super_admins);
+        guard.insert(principal);
+    }
+
+    /// Removes platform-level super-administrator mark for a principal.
+    pub fn remove_super_admin(&self, principal: PrincipalId) {
+        let mut guard = write_guard(&self.inner.super_admins);
+        guard.remove(&principal);
     }
 }
 
@@ -242,6 +255,21 @@ impl GlobalRoleStore for MemoryStore {
             .map(|perms| perms.iter().cloned().collect())
             .unwrap_or_default())
     }
+
+    async fn is_super_admin(
+        &self,
+        principal: PrincipalId,
+    ) -> std::result::Result<bool, crate::StoreError> {
+        self.is_super_admin_ref(&principal).await
+    }
+
+    async fn is_super_admin_ref(
+        &self,
+        principal: &PrincipalId,
+    ) -> std::result::Result<bool, crate::StoreError> {
+        let guard = read_guard(&self.inner.super_admins);
+        Ok(guard.contains(principal))
+    }
 }
 
 #[cfg(test)]
@@ -283,5 +311,19 @@ mod tests {
         let active = block_on(store.tenant_active(tenant)).unwrap();
 
         assert!(active);
+    }
+
+    #[test]
+    fn memory_store_should_support_super_admin() {
+        let store = MemoryStore::new();
+        let principal = PrincipalId::try_from("user_1").unwrap();
+
+        store.add_super_admin(principal.clone());
+        let is_super_admin = block_on(store.is_super_admin(principal.clone())).unwrap();
+        assert!(is_super_admin);
+
+        store.remove_super_admin(principal.clone());
+        let is_super_admin = block_on(store.is_super_admin(principal)).unwrap();
+        assert!(!is_super_admin);
     }
 }

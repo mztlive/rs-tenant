@@ -129,6 +129,27 @@ pub trait GlobalRoleStore {
     ) -> std::result::Result<Vec<Permission>, StoreError> {
         self.global_role_permissions(role.clone()).await
     }
+
+    /// Returns whether a principal is a platform-level super administrator.
+    ///
+    /// Default implementation returns `false`. Override this for systems that
+    /// need a direct super-admin capability without role expansion.
+    async fn is_super_admin(
+        &self,
+        _principal: PrincipalId,
+    ) -> std::result::Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    /// Returns whether a principal is a platform-level super administrator.
+    ///
+    /// Default implementation clones and delegates to [`is_super_admin`].
+    async fn is_super_admin_ref(
+        &self,
+        principal: &PrincipalId,
+    ) -> std::result::Result<bool, StoreError> {
+        self.is_super_admin(principal.clone()).await
+    }
 }
 
 /// Composite store trait.
