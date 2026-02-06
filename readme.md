@@ -50,6 +50,133 @@
 - 即使是超级管理员，也仍受 `tenant_active` 约束。
 - 一旦命中超级管理员，跳过 `principal_active(tenant, principal)` 和角色权限计算。
 
+### 平台角色与租户角色使用规则
+
+这个库支持“平台创建角色给平台员工”和“租户创建角色给租户员工”同时存在。
+
+规则如下：
+- 平台角色：通过 `GlobalRoleStore` 管理（`global_roles` / `global_role_permissions`）。
+- 租户角色：通过 `RoleStore` 管理（`principal_roles` / `role_permissions` / `role_inherits`）。
+- 最终授权是两类权限的并集，只要任意一条命中即 `Allow`。
+- 对非超级管理员，`principal` 仍需在当前租户 `active`，否则直接 `Deny`。
+- 平台角色当前是全局生效模型，不支持“平台角色仅对部分租户生效”的内建约束。
+
+示例 1：平台员工使用平台角色授权
+
+```rust
+use rs_tenant::{
+    Decision, EngineBuilder, GlobalRoleId, MemoryStore, Permission, PrincipalId, TenantId,
+};
+
+async fn demo() -> rs_tenant::Result<()> {
+    let store = MemoryStore::new();
+    let tenant = TenantId::try_from("tenant_a").unwrap();
+    let principal = PrincipalId::try_from("staff_platform_1").unwrap();
+    let global_role = GlobalRoleId::try_from("platform_billing_reader").unwrap();
+
+    store.set_tenant_active(tenant.clone(), true);
+    // 非超级管理员路径下，平台员工也要在当前租户处于 active
+    store.set_principal_active(tenant.clone(), principal.clone(), true);
+    store.add_global_role(principal.clone(), global_role.clone());
+    store.add_global_role_permission(global_role, Permission::try_from("billing:read").unwrap());
+
+    let engine = EngineBuilder::new(store).build();
+    let decision = engine
+        .authorize(
+            tenant,
+            principal,
+            Permission::try_from("billing:read").unwrap(),
+        )
+        .await?;
+    assert_eq!(decision, Decision::Allow);
+    Ok(())
+}
+```
+
+示例 2：租户员工使用租户角色授权
+
+```rust
+use rs_tenant::{Decision, EngineBuilder, MemoryStore, Permission, PrincipalId, RoleId, TenantId};
+
+async fn demo() -> rs_tenant::Result<()> {
+    let store = MemoryStore::new();
+    let tenant = TenantId::try_from("tenant_a").unwrap();
+    let principal = PrincipalId::try_from("staff_tenant_1").unwrap();
+    let role = RoleId::try_from("tenant_invoice_reader").unwrap();
+
+    store.set_tenant_active(tenant.clone(), true);
+    store.set_principal_active(tenant.clone(), principal.clone(), true);
+    store.add_principal_role(tenant.clone(), principal.clone(), role.clone());
+    store.add_role_permission(tenant.clone(), role, Permission::try_from("invoice:read").unwrap());
+
+    let engine = EngineBuilder::new(store).build();
+    let decision = engine
+        .authorize(
+            tenant,
+            principal,
+            Permission::try_from("invoice:read").unwrap(),
+        )
+        .await?;
+    assert_eq!(decision, Decision::Allow);
+    Ok(())
+}
+```
+
+示例 3：平台角色 + 租户角色权限合并
+
+```rust
+use rs_tenant::{
+    Decision, EngineBuilder, GlobalRoleId, MemoryStore, Permission, PrincipalId, RoleId, TenantId,
+};
+
+async fn demo() -> rs_tenant::Result<()> {
+    let store = MemoryStore::new();
+    let tenant = TenantId::try_from("tenant_a").unwrap();
+    let principal = PrincipalId::try_from("staff_mix_1").unwrap();
+
+    let tenant_role = RoleId::try_from("tenant_invoice_reader").unwrap();
+    let global_role = GlobalRoleId::try_from("platform_report_exporter").unwrap();
+
+    store.set_tenant_active(tenant.clone(), true);
+    store.set_principal_active(tenant.clone(), principal.clone(), true);
+
+    // 租户角色权限
+    store.add_principal_role(tenant.clone(), principal.clone(), tenant_role.clone());
+    store.add_role_permission(
+        tenant.clone(),
+        tenant_role,
+        Permission::try_from("invoice:read").unwrap(),
+    );
+
+    // 平台全局角色权限
+    store.add_global_role(principal.clone(), global_role.clone());
+    store.add_global_role_permission(
+        global_role,
+        Permission::try_from("report:export").unwrap(),
+    );
+
+    let engine = EngineBuilder::new(store).build();
+    let d1 = engine
+        .authorize(
+            tenant.clone(),
+            principal.clone(),
+            Permission::try_from("invoice:read").unwrap(),
+        )
+        .await?;
+    let d2 = engine
+        .authorize(
+            tenant,
+            principal,
+            Permission::try_from("report:export").unwrap(),
+        )
+        .await?;
+
+    assert_eq!(d1, Decision::Allow);
+    assert_eq!(d2, Decision::Allow);
+    Ok(())
+}
+```
+
 ## 4. 授权流程（实际执行顺序）
 
 `authorize(tenant, principal, permission)`：
