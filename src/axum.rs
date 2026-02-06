@@ -1,5 +1,6 @@
 //! Axum integration utilities.
 
+use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -77,8 +78,8 @@ where
     type Error = Inner::Error;
     type Future = Pin<Box<dyn std::future::Future<Output = Result<Response, Self::Error>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
@@ -96,7 +97,10 @@ where
                 .authorize(context.tenant, context.principal, permission)
                 .await
             {
-                Ok(Decision::Allow) => inner.call(req).await,
+                Ok(Decision::Allow) => {
+                    poll_fn(|cx| inner.poll_ready(cx)).await?;
+                    inner.call(req).await
+                }
                 Ok(Decision::Deny) => Ok((StatusCode::FORBIDDEN, "forbidden").into_response()),
                 Err(_) => Ok((StatusCode::INTERNAL_SERVER_ERROR, "auth error").into_response()),
             }
@@ -106,13 +110,15 @@ where
 
 #[cfg(feature = "axum-jwt")]
 pub mod jwt {
+    use std::fmt;
+    use std::future::poll_fn;
     use std::marker::PhantomData;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll};
 
     use async_trait::async_trait;
-    use jsonwebtoken::{decode, DecodingKey, Validation};
+    use jsonwebtoken::{DecodingKey, Validation, decode};
     use serde::de::DeserializeOwned;
     use thiserror::Error;
 
@@ -202,11 +208,20 @@ pub mod jwt {
     }
 
     /// JWT auth state holding decoding settings.
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     pub struct JwtAuthState<C: JwtClaims> {
         decoding_key: Arc<DecodingKey>,
         validation: Validation,
         _marker: PhantomData<fn() -> C>,
+    }
+
+    impl<C: JwtClaims> fmt::Debug for JwtAuthState<C> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("JwtAuthState")
+                .field("decoding_key", &"<redacted>")
+                .field("validation", &self.validation)
+                .finish()
+        }
     }
 
     impl<C: JwtClaims> JwtAuthState<C> {
@@ -263,10 +278,7 @@ pub mod jwt {
     {
         type Rejection = AuthRejection;
 
-        async fn from_request_parts(
-            parts: &mut Parts,
-            state: &S,
-        ) -> Result<Self, Self::Rejection> {
+        async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
             if let Some(existing) = parts.extensions.get::<JwtAuth<C>>() {
                 return Ok(existing.clone());
             }
@@ -284,10 +296,7 @@ pub mod jwt {
     {
         type Rejection = AuthRejection;
 
-        async fn from_request_parts(
-            parts: &mut Parts,
-            state: &S,
-        ) -> Result<Self, Self::Rejection> {
+        async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
             let auth = JwtAuth::<DefaultClaims>::from_request_parts(parts, state).await?;
             Ok(auth.context)
         }
@@ -340,8 +349,8 @@ pub mod jwt {
         type Future =
             Pin<Box<dyn std::future::Future<Output = Result<Response, Self::Error>> + Send>>;
 
-        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            self.inner.poll_ready(cx)
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
         }
 
         fn call(&mut self, mut req: Request<Body>) -> Self::Future {
@@ -353,6 +362,7 @@ pub mod jwt {
                     Ok(auth) => {
                         req.extensions_mut().insert(auth.context.clone());
                         req.extensions_mut().insert(auth);
+                        poll_fn(|cx| inner.poll_ready(cx)).await?;
                         inner.call(req).await
                     }
                     Err(err) => Ok(AuthRejection::from(err).into_response()),

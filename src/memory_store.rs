@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
-use async_trait::async_trait;
 use crate::permission::Permission;
 use crate::store::{GlobalRoleStore, RoleStore, TenantStore};
 use crate::types::{GlobalRoleId, PrincipalId, RoleId, TenantId};
+use async_trait::async_trait;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// In-memory store implementation for tests and demos.
 #[derive(Debug, Default, Clone)]
@@ -22,6 +22,20 @@ struct Inner {
     global_role_permissions: RwLock<HashMap<GlobalRoleId, HashSet<Permission>>>,
 }
 
+fn read_guard<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn write_guard<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 impl MemoryStore {
     /// Creates an empty store.
     pub fn new() -> Self {
@@ -30,50 +44,43 @@ impl MemoryStore {
 
     /// Sets tenant active status.
     pub fn set_tenant_active(&self, tenant: TenantId, active: bool) {
-        let mut guard = self.inner.tenants.write().expect("poisoned lock");
+        let mut guard = write_guard(&self.inner.tenants);
         guard.insert(tenant, active);
     }
 
     /// Sets principal active status within a tenant.
     pub fn set_principal_active(&self, tenant: TenantId, principal: PrincipalId, active: bool) {
-        let mut guard = self.inner.principals.write().expect("poisoned lock");
+        let mut guard = write_guard(&self.inner.principals);
         guard.insert((tenant, principal), active);
     }
 
     /// Adds a role to a principal.
     pub fn add_principal_role(&self, tenant: TenantId, principal: PrincipalId, role: RoleId) {
-        let mut guard = self.inner.principal_roles.write().expect("poisoned lock");
-        guard
-            .entry((tenant, principal))
-            .or_default()
-            .insert(role);
+        let mut guard = write_guard(&self.inner.principal_roles);
+        guard.entry((tenant, principal)).or_default().insert(role);
     }
 
     /// Adds a permission to a role.
     pub fn add_role_permission(&self, tenant: TenantId, role: RoleId, permission: Permission) {
-        let mut guard = self.inner.role_permissions.write().expect("poisoned lock");
+        let mut guard = write_guard(&self.inner.role_permissions);
         guard.entry((tenant, role)).or_default().insert(permission);
     }
 
     /// Adds an inheritance edge for a role.
     pub fn add_role_inherit(&self, tenant: TenantId, role: RoleId, parent: RoleId) {
-        let mut guard = self.inner.role_inherits.write().expect("poisoned lock");
+        let mut guard = write_guard(&self.inner.role_inherits);
         guard.entry((tenant, role)).or_default().insert(parent);
     }
 
     /// Adds a global role to a principal.
     pub fn add_global_role(&self, principal: PrincipalId, role: GlobalRoleId) {
-        let mut guard = self.inner.global_roles.write().expect("poisoned lock");
+        let mut guard = write_guard(&self.inner.global_roles);
         guard.entry(principal).or_default().insert(role);
     }
 
     /// Adds a permission to a global role.
     pub fn add_global_role_permission(&self, role: GlobalRoleId, permission: Permission) {
-        let mut guard = self
-            .inner
-            .global_role_permissions
-            .write()
-            .expect("poisoned lock");
+        let mut guard = write_guard(&self.inner.global_role_permissions);
         guard.entry(role).or_default().insert(permission);
     }
 }
@@ -84,7 +91,7 @@ impl TenantStore for MemoryStore {
         &self,
         tenant: TenantId,
     ) -> std::result::Result<bool, crate::StoreError> {
-        let guard = self.inner.tenants.read().expect("poisoned lock");
+        let guard = read_guard(&self.inner.tenants);
         Ok(guard.get(&tenant).copied().unwrap_or(false))
     }
 
@@ -93,11 +100,8 @@ impl TenantStore for MemoryStore {
         tenant: TenantId,
         principal: PrincipalId,
     ) -> std::result::Result<bool, crate::StoreError> {
-        let guard = self.inner.principals.read().expect("poisoned lock");
-        Ok(guard
-            .get(&(tenant, principal))
-            .copied()
-            .unwrap_or(false))
+        let guard = read_guard(&self.inner.principals);
+        Ok(guard.get(&(tenant, principal)).copied().unwrap_or(false))
     }
 }
 
@@ -108,7 +112,7 @@ impl RoleStore for MemoryStore {
         tenant: TenantId,
         principal: PrincipalId,
     ) -> std::result::Result<Vec<RoleId>, crate::StoreError> {
-        let guard = self.inner.principal_roles.read().expect("poisoned lock");
+        let guard = read_guard(&self.inner.principal_roles);
         Ok(guard
             .get(&(tenant, principal))
             .map(|roles| roles.iter().cloned().collect())
@@ -120,7 +124,7 @@ impl RoleStore for MemoryStore {
         tenant: TenantId,
         role: RoleId,
     ) -> std::result::Result<Vec<Permission>, crate::StoreError> {
-        let guard = self.inner.role_permissions.read().expect("poisoned lock");
+        let guard = read_guard(&self.inner.role_permissions);
         Ok(guard
             .get(&(tenant, role))
             .map(|perms| perms.iter().cloned().collect())
@@ -132,7 +136,7 @@ impl RoleStore for MemoryStore {
         tenant: TenantId,
         role: RoleId,
     ) -> std::result::Result<Vec<RoleId>, crate::StoreError> {
-        let guard = self.inner.role_inherits.read().expect("poisoned lock");
+        let guard = read_guard(&self.inner.role_inherits);
         Ok(guard
             .get(&(tenant, role))
             .map(|roles| roles.iter().cloned().collect())
@@ -146,7 +150,7 @@ impl GlobalRoleStore for MemoryStore {
         &self,
         principal: PrincipalId,
     ) -> std::result::Result<Vec<GlobalRoleId>, crate::StoreError> {
-        let guard = self.inner.global_roles.read().expect("poisoned lock");
+        let guard = read_guard(&self.inner.global_roles);
         Ok(guard
             .get(&principal)
             .map(|roles| roles.iter().cloned().collect())
@@ -157,11 +161,7 @@ impl GlobalRoleStore for MemoryStore {
         &self,
         role: GlobalRoleId,
     ) -> std::result::Result<Vec<Permission>, crate::StoreError> {
-        let guard = self
-            .inner
-            .global_role_permissions
-            .read()
-            .expect("poisoned lock");
+        let guard = read_guard(&self.inner.global_role_permissions);
         Ok(guard
             .get(&role)
             .map(|perms| perms.iter().cloned().collect())
@@ -171,8 +171,8 @@ impl GlobalRoleStore for MemoryStore {
 
 #[cfg(test)]
 mod tests {
-    use futures::executor::block_on;
     use super::*;
+    use futures::executor::block_on;
 
     #[test]
     fn memory_store_should_support_basic_flow() {
@@ -191,5 +191,22 @@ mod tests {
         let decision = block_on(engine.authorize(tenant, principal, perm)).unwrap();
 
         assert_eq!(decision, crate::Decision::Allow);
+    }
+
+    #[test]
+    fn memory_store_should_recover_from_poisoned_lock() {
+        let store = MemoryStore::new();
+        let inner = store.inner.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = inner.tenants.write().unwrap();
+            panic!("poison tenants lock");
+        })
+        .join();
+
+        let tenant = TenantId::try_from("tenant_1").unwrap();
+        store.set_tenant_active(tenant.clone(), true);
+        let active = block_on(store.tenant_active(tenant)).unwrap();
+
+        assert!(active);
     }
 }

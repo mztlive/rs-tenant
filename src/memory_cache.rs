@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -62,6 +62,13 @@ impl MemoryCache {
         CacheKey {
             tenant: tenant.clone(),
             principal: principal.clone(),
+        }
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, CacheState> {
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         }
     }
 
@@ -129,15 +136,14 @@ impl Cache for MemoryCache {
 
         let key = Self::key(tenant, principal);
         let now = Instant::now();
-        let mut guard = self.inner.lock().expect("poisoned lock");
+        let mut guard = self.lock_state();
 
-        if let Some(ttl) = self.ttl {
-            if let Some(entry) = guard.entries.get(&key) {
-                if Self::is_expired(entry, ttl, now) {
-                    Self::remove_key(&mut guard, &key);
-                    return None;
-                }
-            }
+        if let Some(ttl) = self.ttl
+            && let Some(entry) = guard.entries.get(&key)
+            && Self::is_expired(entry, ttl, now)
+        {
+            Self::remove_key(&mut guard, &key);
+            return None;
         }
 
         let perms = guard.entries.get(&key).map(|entry| entry.perms.clone());
@@ -159,7 +165,7 @@ impl Cache for MemoryCache {
 
         let key = Self::key(tenant, principal);
         let now = Instant::now();
-        let mut guard = self.inner.lock().expect("poisoned lock");
+        let mut guard = self.lock_state();
 
         if let Some(ttl) = self.ttl {
             Self::prune_expired(&mut guard, ttl, now);
@@ -178,18 +184,18 @@ impl Cache for MemoryCache {
 
     async fn invalidate_principal(&self, tenant: &TenantId, principal: &PrincipalId) {
         let key = Self::key(tenant, principal);
-        let mut guard = self.inner.lock().expect("poisoned lock");
+        let mut guard = self.lock_state();
         Self::remove_key(&mut guard, &key);
     }
 
     async fn invalidate_role(&self, tenant: &TenantId, _role: &RoleId) {
         // Role-to-principal relationships are unknown here, so we invalidate the tenant scope.
-        let mut guard = self.inner.lock().expect("poisoned lock");
+        let mut guard = self.lock_state();
         Self::invalidate_tenant_inner(&mut guard, tenant);
     }
 
     async fn invalidate_tenant(&self, tenant: &TenantId) {
-        let mut guard = self.inner.lock().expect("poisoned lock");
+        let mut guard = self.lock_state();
         Self::invalidate_tenant_inner(&mut guard, tenant);
     }
 }
@@ -254,5 +260,22 @@ mod tests {
 
         assert!(block_on(cache.get_permissions(&tenant, &principal_a)).is_none());
         assert!(block_on(cache.get_permissions(&tenant, &principal_b)).is_none());
+    }
+
+    #[test]
+    fn cache_should_recover_from_poisoned_lock() {
+        let cache = MemoryCache::new(1);
+        let inner = cache.inner.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = inner.lock().unwrap();
+            panic!("poison cache lock");
+        })
+        .join();
+
+        let tenant = tenant();
+        let principal = principal("user_a");
+        block_on(cache.set_permissions(&tenant, &principal, vec![perm("invoice:read")]));
+
+        assert!(block_on(cache.get_permissions(&tenant, &principal)).is_some());
     }
 }

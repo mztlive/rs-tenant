@@ -1,9 +1,11 @@
 use crate::cache::{Cache, NoCache};
 use crate::error::{Error, Result};
-use crate::permission::{permission_matches, resource_matches, Permission};
+use crate::permission::{Permission, permission_matches, resource_matches};
 use crate::store::Store;
 use crate::types::{PrincipalId, ResourceName, RoleId, TenantId};
 use std::collections::HashSet;
+
+const CACHE_SIGNATURE_PREFIX: &str = "__rs_tenant_cache_sig__=";
 
 /// Authorization decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,9 +26,11 @@ pub enum Scope {
 }
 
 /// RBAC engine with pluggable store and optional cache.
+#[derive(Debug)]
 pub struct Engine<S, C = NoCache> {
     store: S,
     cache: C,
+    cache_signature_marker: Permission,
     enable_role_hierarchy: bool,
     enable_wildcard: bool,
     max_inherit_depth: usize,
@@ -96,9 +100,18 @@ impl<S, C> EngineBuilder<S, C> {
 
     /// Builds the engine.
     pub fn build(self) -> Engine<S, C> {
+        let cache_signature_marker = Permission::from_string(format!(
+            "{CACHE_SIGNATURE_PREFIX}rh:{};wc:{};depth:{};norm:{}",
+            u8::from(self.enable_role_hierarchy),
+            u8::from(self.enable_wildcard),
+            self.max_inherit_depth,
+            u8::from(self.permission_normalize),
+        ));
+
         Engine {
             store: self.store,
             cache: self.cache,
+            cache_signature_marker,
             enable_role_hierarchy: self.enable_role_hierarchy,
             enable_wildcard: self.enable_wildcard,
             max_inherit_depth: self.max_inherit_depth,
@@ -199,7 +212,9 @@ where
         tenant: &TenantId,
         principal: &PrincipalId,
     ) -> Result<Vec<Permission>> {
-        if let Some(perms) = self.cache.get_permissions(tenant, principal).await {
+        if let Some(cached) = self.cache.get_permissions(tenant, principal).await
+            && let Some(perms) = self.decode_cached_permissions(cached)
+        {
             return Ok(perms);
         }
 
@@ -239,10 +254,25 @@ where
         }
 
         let perms: Vec<Permission> = permissions.into_iter().collect();
-        self.cache
-            .set_permissions(tenant, principal, perms.clone())
-            .await;
+        let cached = self.encode_cached_permissions(perms.clone());
+        self.cache.set_permissions(tenant, principal, cached).await;
         Ok(perms)
+    }
+
+    fn encode_cached_permissions(&self, perms: Vec<Permission>) -> Vec<Permission> {
+        let mut cached = Vec::with_capacity(perms.len() + 1);
+        cached.push(self.cache_signature_marker.clone());
+        cached.extend(perms);
+        cached
+    }
+
+    fn decode_cached_permissions(&self, cached: Vec<Permission>) -> Option<Vec<Permission>> {
+        let mut iter = cached.into_iter();
+        let marker = iter.next()?;
+        if marker != self.cache_signature_marker {
+            return None;
+        }
+        Some(iter.collect())
     }
 
     async fn expand_roles(&self, tenant: &TenantId, roles: Vec<RoleId>) -> Result<Vec<RoleId>> {
@@ -324,14 +354,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use async_trait::async_trait;
-    use futures::executor::block_on;
     use crate::permission::Permission;
     use crate::store::{GlobalRoleStore, RoleStore, TenantStore};
     use crate::types::{GlobalRoleId, PrincipalId, ResourceName, RoleId, TenantId};
+    use async_trait::async_trait;
+    use futures::executor::block_on;
+    use std::collections::HashMap;
 
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct TestStore {
         tenant_active: bool,
         principal_active: bool,
@@ -342,9 +372,20 @@ mod tests {
         global_role_permissions: HashMap<GlobalRoleId, Vec<Permission>>,
     }
 
+    fn active_store() -> TestStore {
+        TestStore {
+            tenant_active: true,
+            principal_active: true,
+            ..TestStore::default()
+        }
+    }
+
     #[async_trait]
     impl TenantStore for TestStore {
-        async fn tenant_active(&self, _tenant: TenantId) -> std::result::Result<bool, crate::StoreError> {
+        async fn tenant_active(
+            &self,
+            _tenant: TenantId,
+        ) -> std::result::Result<bool, crate::StoreError> {
             Ok(self.tenant_active)
         }
 
@@ -415,16 +456,13 @@ mod tests {
 
     #[test]
     fn authorize_should_allow_exact_permission() {
-        let mut store = TestStore::default();
-        store.tenant_active = true;
-        store.principal_active = true;
+        let mut store = active_store();
 
         let role = RoleId::try_from("role_a").unwrap();
         store.roles = vec![role.clone()];
-        store.role_permissions.insert(
-            role,
-            vec![Permission::try_from("invoice:read").unwrap()],
-        );
+        store
+            .role_permissions
+            .insert(role, vec![Permission::try_from("invoice:read").unwrap()]);
 
         let engine = EngineBuilder::new(store).build();
         let decision = block_on(engine.authorize(
@@ -439,9 +477,11 @@ mod tests {
 
     #[test]
     fn authorize_should_deny_when_tenant_inactive() {
-        let mut store = TestStore::default();
-        store.tenant_active = false;
-        store.principal_active = true;
+        let store = TestStore {
+            tenant_active: false,
+            principal_active: true,
+            ..TestStore::default()
+        };
 
         let engine = EngineBuilder::new(store).build();
         let decision = block_on(engine.authorize(
@@ -456,9 +496,7 @@ mod tests {
 
     #[test]
     fn authorize_should_allow_with_wildcard_when_enabled() {
-        let mut store = TestStore::default();
-        store.tenant_active = true;
-        store.principal_active = true;
+        let mut store = active_store();
 
         let role = RoleId::try_from("role_a").unwrap();
         store.roles = vec![role.clone()];
@@ -479,9 +517,7 @@ mod tests {
 
     #[test]
     fn authorize_should_deny_wildcard_when_disabled() {
-        let mut store = TestStore::default();
-        store.tenant_active = true;
-        store.principal_active = true;
+        let mut store = active_store();
 
         let role = RoleId::try_from("role_a").unwrap();
         store.roles = vec![role.clone()];
@@ -502,9 +538,7 @@ mod tests {
 
     #[test]
     fn authorize_should_allow_via_global_role() {
-        let mut store = TestStore::default();
-        store.tenant_active = true;
-        store.principal_active = true;
+        let mut store = active_store();
 
         let principal = PrincipalId::try_from("user_1").unwrap();
         let global_role = GlobalRoleId::try_from("global_admin").unwrap();
@@ -529,16 +563,13 @@ mod tests {
 
     #[test]
     fn scope_should_return_tenant_only_when_resource_matches() {
-        let mut store = TestStore::default();
-        store.tenant_active = true;
-        store.principal_active = true;
+        let mut store = active_store();
 
         let role = RoleId::try_from("role_a").unwrap();
         store.roles = vec![role.clone()];
-        store.role_permissions.insert(
-            role,
-            vec![Permission::try_from("invoice:read").unwrap()],
-        );
+        store
+            .role_permissions
+            .insert(role, vec![Permission::try_from("invoice:read").unwrap()]);
 
         let engine = EngineBuilder::new(store).build();
         let scope = block_on(engine.scope(
@@ -553,16 +584,13 @@ mod tests {
 
     #[test]
     fn scope_should_return_none_when_resource_not_allowed() {
-        let mut store = TestStore::default();
-        store.tenant_active = true;
-        store.principal_active = true;
+        let mut store = active_store();
 
         let role = RoleId::try_from("role_a").unwrap();
         store.roles = vec![role.clone()];
-        store.role_permissions.insert(
-            role,
-            vec![Permission::try_from("invoice:read").unwrap()],
-        );
+        store
+            .role_permissions
+            .insert(role, vec![Permission::try_from("invoice:read").unwrap()]);
 
         let engine = EngineBuilder::new(store).build();
         let scope = block_on(engine.scope(
@@ -576,23 +604,76 @@ mod tests {
     }
 
     #[test]
+    fn scope_should_ignore_wildcard_permission_when_disabled() {
+        let mut store = active_store();
+
+        let role = RoleId::try_from("role_a").unwrap();
+        store.roles = vec![role.clone()];
+        store
+            .role_permissions
+            .insert(role, vec![Permission::try_from("invoice:*").unwrap()]);
+
+        let engine = EngineBuilder::new(store).build();
+        let scope = block_on(engine.scope(
+            TenantId::try_from("tenant_1").unwrap(),
+            PrincipalId::try_from("user_1").unwrap(),
+            ResourceName::try_from("invoice").unwrap(),
+        ))
+        .unwrap();
+
+        assert_eq!(scope, Scope::None);
+    }
+
+    #[cfg(feature = "memory-cache")]
+    #[test]
+    fn shared_cache_should_isolate_different_engine_configs() {
+        let mut store = active_store();
+
+        let role = RoleId::try_from("role_a").unwrap();
+        store.roles = vec![role.clone()];
+        store
+            .role_permissions
+            .insert(role, vec![Permission::try_from("invoice:*").unwrap()]);
+
+        let cache = crate::MemoryCache::new(8);
+        let wildcard_engine = EngineBuilder::new(store.clone())
+            .enable_wildcard(true)
+            .cache(cache.clone())
+            .build();
+        let strict_engine = EngineBuilder::new(store).cache(cache).build();
+
+        let tenant = TenantId::try_from("tenant_1").unwrap();
+        let principal = PrincipalId::try_from("user_1").unwrap();
+        let required = Permission::try_from("invoice:read").unwrap();
+
+        let wildcard_decision = block_on(wildcard_engine.authorize(
+            tenant.clone(),
+            principal.clone(),
+            required.clone(),
+        ))
+        .unwrap();
+        assert_eq!(wildcard_decision, Decision::Allow);
+
+        let strict_decision =
+            block_on(strict_engine.authorize(tenant, principal, required)).unwrap();
+        assert_eq!(strict_decision, Decision::Deny);
+    }
+
+    #[test]
     fn role_cycle_should_return_error() {
-        let mut store = TestStore::default();
-        store.tenant_active = true;
-        store.principal_active = true;
+        let mut store = active_store();
 
         let role_a = RoleId::try_from("role_a").unwrap();
         let role_b = RoleId::try_from("role_b").unwrap();
         store.roles = vec![role_a.clone()];
-        store
-            .role_permissions
-            .insert(role_a.clone(), vec![Permission::try_from("invoice:read").unwrap()]);
+        store.role_permissions.insert(
+            role_a.clone(),
+            vec![Permission::try_from("invoice:read").unwrap()],
+        );
         store
             .role_inherits
             .insert(role_a.clone(), vec![role_b.clone()]);
-        store
-            .role_inherits
-            .insert(role_b, vec![role_a.clone()]);
+        store.role_inherits.insert(role_b, vec![role_a.clone()]);
 
         let engine = EngineBuilder::new(store)
             .enable_role_hierarchy(true)
@@ -608,9 +689,7 @@ mod tests {
 
     #[test]
     fn role_depth_should_return_error_when_exceeded() {
-        let mut store = TestStore::default();
-        store.tenant_active = true;
-        store.principal_active = true;
+        let mut store = active_store();
 
         let role_a = RoleId::try_from("role_a").unwrap();
         let role_b = RoleId::try_from("role_b").unwrap();

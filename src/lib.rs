@@ -36,11 +36,11 @@
 mod cache;
 mod engine;
 mod error;
+#[cfg(feature = "memory-cache")]
+mod memory_cache;
 mod permission;
 mod store;
 mod types;
-#[cfg(feature = "memory-cache")]
-mod memory_cache;
 
 #[cfg(feature = "memory-store")]
 mod memory_store;

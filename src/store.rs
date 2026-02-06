@@ -1,7 +1,7 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
 use crate::permission::Permission;
 use crate::types::{GlobalRoleId, PrincipalId, RoleId, TenantId};
+use async_trait::async_trait;
 
 /// Store interface for tenant and principal activation.
 #[async_trait]

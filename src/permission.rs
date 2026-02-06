@@ -144,22 +144,29 @@ fn normalize_for_match<'a>(value: &'a str, normalize: bool) -> Cow<'a, str> {
     }
 }
 
+fn has_wildcard_segment(resource: &str, action: &str) -> bool {
+    action == "*" || resource.split(':').any(|segment| segment == "*")
+}
+
 pub(crate) fn permission_matches(
     granted: &Permission,
     required: &Permission,
     enable_wildcard: bool,
     normalize: bool,
 ) -> bool {
-    let Some((g_res, g_act)) = split_permission(granted.as_str()) else {
+    let Some((g_res_raw, g_act_raw)) = split_permission(granted.as_str()) else {
         return false;
     };
-    let Some((r_res, r_act)) = split_permission(required.as_str()) else {
+    let Some((r_res_raw, r_act_raw)) = split_permission(required.as_str()) else {
         return false;
     };
-    let g_res = normalize_for_match(g_res, normalize);
-    let g_act = normalize_for_match(g_act, normalize);
-    let r_res = normalize_for_match(r_res, normalize);
-    let r_act = normalize_for_match(r_act, normalize);
+    if !enable_wildcard && has_wildcard_segment(g_res_raw, g_act_raw) {
+        return false;
+    }
+    let g_res = normalize_for_match(g_res_raw, normalize);
+    let g_act = normalize_for_match(g_act_raw, normalize);
+    let r_res = normalize_for_match(r_res_raw, normalize);
+    let r_act = normalize_for_match(r_act_raw, normalize);
 
     if !enable_wildcard {
         return g_res == r_res && g_act == r_act;
@@ -183,10 +190,13 @@ pub(crate) fn resource_matches(
     enable_wildcard: bool,
     normalize: bool,
 ) -> bool {
-    let Some((g_res, _)) = split_permission(granted.as_str()) else {
+    let Some((g_res_raw, g_act_raw)) = split_permission(granted.as_str()) else {
         return false;
     };
-    let g_res = normalize_for_match(g_res, normalize);
+    if !enable_wildcard && has_wildcard_segment(g_res_raw, g_act_raw) {
+        return false;
+    }
+    let g_res = normalize_for_match(g_res_raw, normalize);
     let resource = normalize_for_match(resource.as_str(), normalize);
 
     if !enable_wildcard {
@@ -212,5 +222,21 @@ mod tests {
     fn try_from_should_reject_empty_segments() {
         let result = Permission::try_from(":read");
         assert!(matches!(result, Err(Error::InvalidPermission(_))));
+    }
+
+    #[test]
+    fn resource_match_should_ignore_wildcard_permission_when_disabled() {
+        let granted = Permission::try_from("invoice:*").unwrap();
+        let resource = ResourceName::try_from("invoice").unwrap();
+
+        assert!(!resource_matches(&granted, &resource, false, true));
+    }
+
+    #[test]
+    fn permission_match_should_ignore_wildcard_permission_when_disabled() {
+        let granted = Permission::try_from("invoice:*").unwrap();
+        let required = Permission::try_from("invoice:*").unwrap();
+
+        assert!(!permission_matches(&granted, &required, false, true));
     }
 }

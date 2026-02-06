@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::permission::Permission;
 use crate::types::{PrincipalId, RoleId, TenantId};
+use async_trait::async_trait;
 
 /// Cache interface for effective permissions.
 #[async_trait]
