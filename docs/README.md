@@ -5,7 +5,7 @@
 ## 快速入口
 
 - [从项目总览开始](01-overview.md)
-- [查看完整目录（GitBook）](SUMMARY.md)
+- [查看完整目录](SUMMARY.md)
 - [5 分钟快速接入](04-quickstart.md)
 - [生产环境集成指南](05-integration-production.md)
 - [Axum 与 JWT 集成](06-axum-integration.md)

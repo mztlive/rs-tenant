@@ -152,6 +152,23 @@ casbin = []
 - `docs/08-testing-benchmark.md`：测试与基准
 - `docs/09-faq-troubleshooting.md`：FAQ 与排查
 
+## 文档发布（mdBook + GitHub Pages）
+
+仓库已内置 `book.toml` 与 `.github/workflows/mdbook.yml`，文档会在 `main` 分支的文档变更后自动发布到 GitHub Pages。
+
+本地预览：
+
+```bash
+cargo install mdbook --locked
+mdbook serve
+```
+
+首次启用 GitHub Pages：
+
+1. 打开仓库 `Settings -> Pages`
+2. `Build and deployment` 的 `Source` 选择 `GitHub Actions`
+3. 合并并推送本次配置后，等待 `Deploy mdBook to GitHub Pages` 工作流完成
+
 ## 开发与测试命令
 
 ```bash
