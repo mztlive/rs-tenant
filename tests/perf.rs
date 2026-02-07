@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 
 const REPEATS: usize = 5;
 
+fn principal(account_id: &str) -> PrincipalId {
+    PrincipalId::try_from_parts("perf", account_id).expect("principal id")
+}
+
 fn benchmark_sync<F>(name: &str, iterations: usize, mut op: F)
 where
     F: FnMut(),
@@ -76,7 +80,7 @@ where
 fn setup_flat_store() -> (MemoryStore, TenantId, PrincipalId, Permission, ResourceName) {
     let store = MemoryStore::new();
     let tenant = TenantId::try_from("tenant_perf").unwrap();
-    let principal = PrincipalId::try_from("principal_perf").unwrap();
+    let principal = principal("principal_perf");
     let role = RoleId::try_from("role_reader").unwrap();
     let permission = Permission::try_from("invoice:read").unwrap();
     let resource = ResourceName::try_from("invoice").unwrap();
@@ -101,7 +105,7 @@ fn setup_hierarchy_store(
 ) {
     let store = MemoryStore::new();
     let tenant = TenantId::try_from("tenant_hier_perf").unwrap();
-    let principal = PrincipalId::try_from("principal_hier_perf").unwrap();
+    let principal = principal("principal_hier_perf");
     let permission = Permission::try_from("invoice:read").unwrap();
     let resource = ResourceName::try_from("invoice").unwrap();
 

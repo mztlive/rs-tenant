@@ -60,6 +60,7 @@
 - 最终授权是两类权限的并集，只要任意一条命中即 `Allow`。
 - 对非超级管理员，`principal` 仍需在当前租户 `active`，否则直接 `Deny`。
 - 平台角色当前是全局生效模型，不支持“平台角色仅对部分租户生效”的内建约束。
+- 推荐：如主体 ID 由 `账号类型 + 账号ID` 组成，优先使用 `PrincipalId::try_from_parts(kind, account_id)`。
 
 示例 1：平台员工使用平台角色授权
 
@@ -71,7 +72,7 @@ use rs_tenant::{
 async fn demo() -> rs_tenant::Result<()> {
     let store = MemoryStore::new();
     let tenant = TenantId::try_from("tenant_a").unwrap();
-    let principal = PrincipalId::try_from("staff_platform_1").unwrap();
+    let principal = PrincipalId::try_from_parts("employee", "staff_platform_1").unwrap();
     let global_role = GlobalRoleId::try_from("platform_billing_reader").unwrap();
 
     store.set_tenant_active(tenant.clone(), true);
@@ -101,7 +102,7 @@ use rs_tenant::{Decision, EngineBuilder, MemoryStore, Permission, PrincipalId, R
 async fn demo() -> rs_tenant::Result<()> {
     let store = MemoryStore::new();
     let tenant = TenantId::try_from("tenant_a").unwrap();
-    let principal = PrincipalId::try_from("staff_tenant_1").unwrap();
+    let principal = PrincipalId::try_from_parts("employee", "staff_tenant_1").unwrap();
     let role = RoleId::try_from("tenant_invoice_reader").unwrap();
 
     store.set_tenant_active(tenant.clone(), true);
@@ -132,7 +133,7 @@ use rs_tenant::{
 async fn demo() -> rs_tenant::Result<()> {
     let store = MemoryStore::new();
     let tenant = TenantId::try_from("tenant_a").unwrap();
-    let principal = PrincipalId::try_from("staff_mix_1").unwrap();
+    let principal = PrincipalId::try_from_parts("employee", "staff_mix_1").unwrap();
 
     let tenant_role = RoleId::try_from("tenant_invoice_reader").unwrap();
     let global_role = GlobalRoleId::try_from("platform_report_exporter").unwrap();
@@ -234,7 +235,7 @@ async fn demo() -> rs_tenant::Result<()> {
     let store = MemoryStore::new();
 
     let tenant = TenantId::try_from("tenant_a").unwrap();
-    let principal = PrincipalId::try_from("user_1").unwrap();
+    let principal = PrincipalId::try_from_parts("employee", "user_1").unwrap();
     let role = RoleId::try_from("invoice_reader").unwrap();
     let permission = Permission::try_from("invoice:read").unwrap();
 
@@ -261,7 +262,7 @@ async fn demo() -> rs_tenant::Result<()> {
     let store = MemoryStore::new();
 
     let tenant = TenantId::try_from("tenant_a").unwrap();
-    let principal = PrincipalId::try_from("platform_admin").unwrap();
+    let principal = PrincipalId::try_from_parts("admin", "platform_admin").unwrap();
 
     store.set_tenant_active(tenant.clone(), true);
     store.add_super_admin(principal.clone());

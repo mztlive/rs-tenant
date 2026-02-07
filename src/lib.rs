@@ -15,7 +15,7 @@
 //! let store = MemoryStore::new();
 //! let engine = EngineBuilder::new(store).build();
 //! let tenant = TenantId::try_from("tenant_1").unwrap();
-//! let principal = PrincipalId::try_from("user_1").unwrap();
+//! let principal = PrincipalId::try_from_parts("employee", "user_1").unwrap();
 //! let permission = Permission::try_from("invoice:read").unwrap();
 //! let _ = engine.authorize(tenant, principal, permission);
 //! # }

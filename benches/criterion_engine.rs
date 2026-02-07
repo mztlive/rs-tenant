@@ -12,10 +12,14 @@ use rs_tenant::{
 };
 use std::time::Duration;
 
+fn principal(account_id: &str) -> PrincipalId {
+    PrincipalId::try_from_parts("bench", account_id).expect("principal id")
+}
+
 fn setup_flat_store() -> (MemoryStore, TenantId, PrincipalId, Permission, ResourceName) {
     let store = MemoryStore::new();
     let tenant = TenantId::try_from("tenant_bench").unwrap();
-    let principal = PrincipalId::try_from("principal_bench").unwrap();
+    let principal = principal("principal_bench");
     let role = RoleId::try_from("role_reader").unwrap();
     let permission = Permission::try_from("invoice:read").unwrap();
     let resource = ResourceName::try_from("invoice").unwrap();
@@ -31,7 +35,7 @@ fn setup_flat_store() -> (MemoryStore, TenantId, PrincipalId, Permission, Resour
 fn setup_hierarchy_store(depth: usize) -> (MemoryStore, TenantId, PrincipalId, Permission) {
     let store = MemoryStore::new();
     let tenant = TenantId::try_from("tenant_hierarchy_bench").unwrap();
-    let principal = PrincipalId::try_from("principal_hierarchy_bench").unwrap();
+    let principal = principal("principal_hierarchy_bench");
     let permission = Permission::try_from("invoice:read").unwrap();
 
     store.set_tenant_active(tenant.clone(), true);
@@ -55,7 +59,7 @@ fn setup_hierarchy_store(depth: usize) -> (MemoryStore, TenantId, PrincipalId, P
 fn setup_role_fanout_store(role_count: usize) -> (MemoryStore, TenantId, PrincipalId, Permission) {
     let store = MemoryStore::new();
     let tenant = TenantId::try_from("tenant_fanout_bench").unwrap();
-    let principal = PrincipalId::try_from("principal_fanout_bench").unwrap();
+    let principal = principal("principal_fanout_bench");
 
     store.set_tenant_active(tenant.clone(), true);
     store.set_principal_active(tenant.clone(), principal.clone(), true);

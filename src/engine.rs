@@ -379,6 +379,10 @@ mod tests {
         }
     }
 
+    fn principal(account_id: &str) -> PrincipalId {
+        PrincipalId::try_from_parts("user", account_id).expect("principal id")
+    }
+
     #[async_trait]
     impl TenantStore for TestStore {
         async fn tenant_active(
@@ -473,7 +477,7 @@ mod tests {
         let engine = EngineBuilder::new(store).build();
         let decision = block_on(engine.authorize(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             Permission::try_from("invoice:read").unwrap(),
         ))
         .unwrap();
@@ -492,7 +496,7 @@ mod tests {
         let engine = EngineBuilder::new(store).build();
         let decision = block_on(engine.authorize(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             Permission::try_from("invoice:read").unwrap(),
         ))
         .unwrap();
@@ -513,7 +517,7 @@ mod tests {
         let engine = EngineBuilder::new(store).enable_wildcard(true).build();
         let decision = block_on(engine.authorize(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             Permission::try_from("invoice:read").unwrap(),
         ))
         .unwrap();
@@ -534,7 +538,7 @@ mod tests {
         let engine = EngineBuilder::new(store).build();
         let decision = block_on(engine.authorize(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             Permission::try_from("invoice:read").unwrap(),
         ))
         .unwrap();
@@ -546,7 +550,7 @@ mod tests {
     fn authorize_should_allow_via_global_role() {
         let mut store = active_store();
 
-        let principal = PrincipalId::try_from("user_1").unwrap();
+        let principal = principal("user_1");
         let global_role = GlobalRoleId::try_from("global_admin").unwrap();
         store
             .global_roles
@@ -580,7 +584,7 @@ mod tests {
         let engine = EngineBuilder::new(store).build();
         let scope = block_on(engine.scope(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             ResourceName::try_from("invoice").unwrap(),
         ))
         .unwrap();
@@ -601,7 +605,7 @@ mod tests {
         let engine = EngineBuilder::new(store).build();
         let scope = block_on(engine.scope(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             ResourceName::try_from("customer").unwrap(),
         ))
         .unwrap();
@@ -622,7 +626,7 @@ mod tests {
         let engine = EngineBuilder::new(store).build();
         let scope = block_on(engine.scope(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             ResourceName::try_from("invoice").unwrap(),
         ))
         .unwrap();
@@ -639,7 +643,7 @@ mod tests {
         let engine = EngineBuilder::new(store).enable_super_admin(true).build();
         let decision = block_on(engine.authorize(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             Permission::try_from("invoice:delete").unwrap(),
         ))
         .unwrap();
@@ -656,7 +660,7 @@ mod tests {
         let engine = EngineBuilder::new(store).build();
         let decision = block_on(engine.authorize(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             Permission::try_from("invoice:delete").unwrap(),
         ))
         .unwrap();
@@ -673,7 +677,7 @@ mod tests {
         let engine = EngineBuilder::new(store).enable_super_admin(true).build();
         let scope = block_on(engine.scope(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             ResourceName::try_from("customer").unwrap(),
         ))
         .unwrap();
@@ -690,7 +694,7 @@ mod tests {
         let engine = EngineBuilder::new(store).enable_super_admin(true).build();
         let decision = block_on(engine.authorize(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             Permission::try_from("invoice:delete").unwrap(),
         ))
         .unwrap();
@@ -717,7 +721,7 @@ mod tests {
         let strict_engine = EngineBuilder::new(store).cache(cache).build();
 
         let tenant = TenantId::try_from("tenant_1").unwrap();
-        let principal = PrincipalId::try_from("user_1").unwrap();
+        let principal = principal("user_1");
         let required = Permission::try_from("invoice:read").unwrap();
 
         let wildcard_decision = block_on(wildcard_engine.authorize(
@@ -747,7 +751,7 @@ mod tests {
         let strict_engine = EngineBuilder::new(store).cache(cache).build();
 
         let tenant = TenantId::try_from("tenant_1").unwrap();
-        let principal = PrincipalId::try_from("user_1").unwrap();
+        let principal = principal("user_1");
         let required = Permission::try_from("invoice:delete").unwrap();
 
         let super_admin_decision = block_on(super_admin_engine.authorize(
@@ -784,7 +788,7 @@ mod tests {
             .build();
         let result = block_on(engine.authorize(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             Permission::try_from("invoice:read").unwrap(),
         ));
 
@@ -810,7 +814,7 @@ mod tests {
             .build();
         let result = block_on(engine.authorize(
             TenantId::try_from("tenant_1").unwrap(),
-            PrincipalId::try_from("user_1").unwrap(),
+            principal("user_1"),
             Permission::try_from("invoice:read").unwrap(),
         ));
 

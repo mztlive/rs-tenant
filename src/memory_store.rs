@@ -277,11 +277,15 @@ mod tests {
     use super::*;
     use futures::executor::block_on;
 
+    fn principal(account_id: &str) -> PrincipalId {
+        PrincipalId::try_from_parts("user", account_id).expect("principal id")
+    }
+
     #[test]
     fn memory_store_should_support_basic_flow() {
         let store = MemoryStore::new();
         let tenant = TenantId::try_from("tenant_1").unwrap();
-        let principal = PrincipalId::try_from("user_1").unwrap();
+        let principal = principal("user_1");
         let role = RoleId::try_from("role_a").unwrap();
         let perm = Permission::try_from("invoice:read").unwrap();
 
@@ -316,7 +320,7 @@ mod tests {
     #[test]
     fn memory_store_should_support_super_admin() {
         let store = MemoryStore::new();
-        let principal = PrincipalId::try_from("user_1").unwrap();
+        let principal = principal("user_1");
 
         store.add_super_admin(principal.clone());
         let is_super_admin = block_on(store.is_super_admin(principal.clone())).unwrap();
