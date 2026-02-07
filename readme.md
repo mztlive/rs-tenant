@@ -1,230 +1,49 @@
 # rs-tenant
 
-多租户 RBAC 权限库（Rust）。
+Rust 多租户 RBAC 授权库。
 
-它专注做三件事：
-- 在租户上下文内做可靠授权（`authorize`）
-- 在资源查询前给出可执行的作用域（`scope`）
-- 通过可插拔 `Store` 对接你自己的数据库/缓存
+`rs-tenant` 提供一个可插拔的授权引擎，目标是将“权限决策”与“业务存储实现”解耦：
 
-默认策略是 `Deny by default`。
+- 在租户上下文内进行授权判定：`authorize`
+- 在查询前计算可访问范围：`scope`
+- 通过 `Store` trait 接入任意数据库/缓存
 
-## 1. 适用场景
+默认策略为 `Deny by default`。
+
+## 适用场景
 
 适合：
+
 - SaaS 多租户系统
-- 需要“租户角色 + 平台全局角色”混合授权
-- 希望把权限引擎和业务存储解耦
+- 同时存在租户角色与平台全局角色的系统
+- 希望将权限判断从业务逻辑中抽离的服务
 
 不适合：
-- 纯 ABAC（复杂属性策略）为主的系统
-- 希望库内直接托管数据库模型/迁移的场景
 
-## 2. 当前能力
+- 以复杂 ABAC 为主的授权模型
+- 需要库内直接托管 ORM 模型与迁移
+
+## 核心能力
 
 - 强类型 ID：`TenantId`、`PrincipalId`、`RoleId`、`GlobalRoleId`
 - 权限模型：`resource:action`（如 `invoice:read`）
-- 可选角色继承（层级展开、环检测、深度限制）
-- 可选通配权限（`*:*`、`invoice:*` 等）
-- 全局角色（跨租户）
-- 平台级超级管理员（可选开关）
-- 内存 `Store`（测试/演示）
-- 内存 `Cache`（TTL + LRU + 分片锁）
+- 租户角色 + 平台角色并集授权
+- 可选角色继承（含环检测、深度限制）
+- 可选 wildcard（如 `*:*`、`invoice:*`）
+- 可选超级管理员短路授权
+- 可选内存缓存（TTL、LRU、分片）
 - Axum 中间件集成（可选 JWT 解析）
 
-## 3. 核心概念
+## 快速开始
 
-- `Tenant`：租户
-- `Principal`：主体（用户/服务账号）
-- `Role`：租户内角色
-- `GlobalRole`：平台级全局角色
-- `Permission`：权限字符串，格式 `resource:action`
-- `Decision`：`Allow` 或 `Deny`
-- `Scope`：`None` 或 `TenantOnly { tenant }`
-
-### 平台超级管理员语义
-
-这是你当前库中的明确设计：
-- 超级管理员是平台级能力，只按 `principal` 判断，不按租户存储。
-- 需要显式启用：`EngineBuilder::enable_super_admin(true)`。
-- 即使是超级管理员，也仍受 `tenant_active` 约束。
-- 一旦命中超级管理员，跳过 `principal_active(tenant, principal)` 和角色权限计算。
-
-### 平台角色与租户角色使用规则
-
-这个库支持“平台创建角色给平台员工”和“租户创建角色给租户员工”同时存在。
-
-规则如下：
-- 平台角色：通过 `GlobalRoleStore` 管理（`global_roles` / `global_role_permissions`）。
-- 租户角色：通过 `RoleStore` 管理（`principal_roles` / `role_permissions` / `role_inherits`）。
-- 最终授权是两类权限的并集，只要任意一条命中即 `Allow`。
-- 对非超级管理员，`principal` 仍需在当前租户 `active`，否则直接 `Deny`。
-- 平台角色当前是全局生效模型，不支持“平台角色仅对部分租户生效”的内建约束。
-- 推荐：如主体 ID 由 `账号类型 + 账号ID` 组成，优先使用 `PrincipalId::try_from_parts(kind, account_id)`。
-
-示例 1：平台员工使用平台角色授权
-
-```rust
-use rs_tenant::{
-    Decision, EngineBuilder, GlobalRoleId, MemoryStore, Permission, PrincipalId, TenantId,
-};
-
-async fn demo() -> rs_tenant::Result<()> {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_a").unwrap();
-    let principal = PrincipalId::try_from_parts("employee", "staff_platform_1").unwrap();
-    let global_role = GlobalRoleId::try_from("platform_billing_reader").unwrap();
-
-    store.set_tenant_active(tenant.clone(), true);
-    // 非超级管理员路径下，平台员工也要在当前租户处于 active
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
-    store.add_global_role(principal.clone(), global_role.clone());
-    store.add_global_role_permission(global_role, Permission::try_from("billing:read").unwrap());
-
-    let engine = EngineBuilder::new(store).build();
-    let decision = engine
-        .authorize(
-            tenant,
-            principal,
-            Permission::try_from("billing:read").unwrap(),
-        )
-        .await?;
-    assert_eq!(decision, Decision::Allow);
-    Ok(())
-}
-```
-
-示例 2：租户员工使用租户角色授权
-
-```rust
-use rs_tenant::{Decision, EngineBuilder, MemoryStore, Permission, PrincipalId, RoleId, TenantId};
-
-async fn demo() -> rs_tenant::Result<()> {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_a").unwrap();
-    let principal = PrincipalId::try_from_parts("employee", "staff_tenant_1").unwrap();
-    let role = RoleId::try_from("tenant_invoice_reader").unwrap();
-
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
-    store.add_principal_role(tenant.clone(), principal.clone(), role.clone());
-    store.add_role_permission(tenant.clone(), role, Permission::try_from("invoice:read").unwrap());
-
-    let engine = EngineBuilder::new(store).build();
-    let decision = engine
-        .authorize(
-            tenant,
-            principal,
-            Permission::try_from("invoice:read").unwrap(),
-        )
-        .await?;
-    assert_eq!(decision, Decision::Allow);
-    Ok(())
-}
-```
-
-示例 3：平台角色 + 租户角色权限合并
-
-```rust
-use rs_tenant::{
-    Decision, EngineBuilder, GlobalRoleId, MemoryStore, Permission, PrincipalId, RoleId, TenantId,
-};
-
-async fn demo() -> rs_tenant::Result<()> {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_a").unwrap();
-    let principal = PrincipalId::try_from_parts("employee", "staff_mix_1").unwrap();
-
-    let tenant_role = RoleId::try_from("tenant_invoice_reader").unwrap();
-    let global_role = GlobalRoleId::try_from("platform_report_exporter").unwrap();
-
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
-
-    // 租户角色权限
-    store.add_principal_role(tenant.clone(), principal.clone(), tenant_role.clone());
-    store.add_role_permission(
-        tenant.clone(),
-        tenant_role,
-        Permission::try_from("invoice:read").unwrap(),
-    );
-
-    // 平台全局角色权限
-    store.add_global_role(principal.clone(), global_role.clone());
-    store.add_global_role_permission(
-        global_role,
-        Permission::try_from("report:export").unwrap(),
-    );
-
-    let engine = EngineBuilder::new(store).build();
-    let d1 = engine
-        .authorize(
-            tenant.clone(),
-            principal.clone(),
-            Permission::try_from("invoice:read").unwrap(),
-        )
-        .await?;
-    let d2 = engine
-        .authorize(
-            tenant,
-            principal,
-            Permission::try_from("report:export").unwrap(),
-        )
-        .await?;
-
-    assert_eq!(d1, Decision::Allow);
-    assert_eq!(d2, Decision::Allow);
-    Ok(())
-}
-```
-
-## 4. 授权流程（实际执行顺序）
-
-`authorize(tenant, principal, permission)`：
-
-1. 检查 `tenant_active(tenant)`，否则 `Deny`
-2. 如果开启 super-admin 且 `is_super_admin(principal)`，直接 `Allow`
-3. 检查 `principal_active(tenant, principal)`，否则 `Deny`
-4. 收集权限：租户角色权限 + 全局角色权限
-5. 进行权限匹配
-6. 命中则 `Allow`，否则 `Deny`
-
-`scope(tenant, principal, resource)` 类似，返回 `TenantOnly` 或 `None`。
-
-## 5. 依赖与 Feature
-
-```toml
-[dependencies]
-# 如果你从 crates.io 使用
-rs-tenant = { version = "0.1", features = [] }
-
-# 如果你在 monorepo 或本地路径使用
-# rs-tenant = { path = "../rs-tenant", features = [] }
-```
-
-常用 feature：
-- `memory-store`：内存存储实现
-- `memory-cache`：内存缓存实现
-- `serde`：类型序列化支持
-- `axum`：Axum 授权中间件
-- `axum-jwt`：JWT 解析 + Axum（依赖 `axum` 与 `serde`）
-- `criterion-bench`：Criterion 基准测试
-
-说明：
-- `casbin` feature 当前仅保留开关，暂未提供公开 Casbin 适配 API。
-
-## 6. 快速开始（5 分钟）
-
-下面示例使用内存存储，快速跑通授权。
-
-### Step 1: 打开内存 feature
+### 1) 添加依赖
 
 ```toml
 [dependencies]
 rs-tenant = { version = "0.1", features = ["memory-store"] }
 ```
 
-### Step 2: 构造测试数据并授权
+### 2) 最小授权示例
 
 ```rust
 use rs_tenant::{
@@ -234,10 +53,10 @@ use rs_tenant::{
 async fn demo() -> rs_tenant::Result<()> {
     let store = MemoryStore::new();
 
-    let tenant = TenantId::try_from("tenant_a").unwrap();
-    let principal = PrincipalId::try_from_parts("employee", "user_1").unwrap();
-    let role = RoleId::try_from("invoice_reader").unwrap();
-    let permission = Permission::try_from("invoice:read").unwrap();
+    let tenant = TenantId::try_from("tenant_a")?;
+    let principal = PrincipalId::try_from_parts("employee", "user_1")?;
+    let role = RoleId::try_from("invoice_reader")?;
+    let permission = Permission::try_from("invoice:read")?;
 
     store.set_tenant_active(tenant.clone(), true);
     store.set_principal_active(tenant.clone(), principal.clone(), true);
@@ -245,7 +64,6 @@ async fn demo() -> rs_tenant::Result<()> {
     store.add_role_permission(tenant.clone(), role, permission.clone());
 
     let engine = EngineBuilder::new(store).build();
-
     let decision = engine.authorize(tenant, principal, permission).await?;
 
     assert_eq!(decision, Decision::Allow);
@@ -253,252 +71,115 @@ async fn demo() -> rs_tenant::Result<()> {
 }
 ```
 
-### Step 3: 启用平台超级管理员（可选）
+### 3) 本地验证
 
-```rust
-use rs_tenant::{Decision, EngineBuilder, MemoryStore, Permission, PrincipalId, TenantId};
-
-async fn demo() -> rs_tenant::Result<()> {
-    let store = MemoryStore::new();
-
-    let tenant = TenantId::try_from("tenant_a").unwrap();
-    let principal = PrincipalId::try_from_parts("admin", "platform_admin").unwrap();
-
-    store.set_tenant_active(tenant.clone(), true);
-    store.add_super_admin(principal.clone());
-
-    let engine = EngineBuilder::new(store)
-        .enable_super_admin(true)
-        .build();
-
-    let decision = engine.authorize(
-        tenant,
-        principal,
-        Permission::try_from("any_resource:any_action").unwrap(),
-    )
-    .await?;
-
-    assert_eq!(decision, Decision::Allow);
-    Ok(())
-}
+```bash
+cargo test --offline --features memory-store,memory-cache
 ```
 
-## 7. 生产接入指南（循序渐进）
+## 授权语义（摘要）
 
-### Step 1: 先设计数据模型
+`authorize(tenant, principal, permission)` 执行顺序：
 
-推荐至少有这些逻辑表：
-- `tenants(id, active)`
-- `tenant_principals(tenant_id, principal_id, active)`
-- `tenant_principal_roles(tenant_id, principal_id, role_id)`
-- `tenant_role_permissions(tenant_id, role_id, permission)`
-- `tenant_role_inherits(tenant_id, role_id, parent_role_id)`
-- `global_principal_roles(principal_id, global_role_id)`
-- `global_role_permissions(global_role_id, permission)`
-- `platform_super_admins(principal_id)`
+1. `tenant_active(tenant)`
+2. （可选）`is_super_admin(principal)`
+3. `principal_active(tenant, principal)`
+4. 收集权限（租户角色 + 全局角色）
+5. 按配置匹配权限，返回 `Allow` 或 `Deny`
 
-索引建议：
-- 所有以 `tenant_id` 查询的表，建立前导 `tenant_id` 组合索引
-- 角色关系表至少有 `(tenant_id, role_id)` 索引
-- `platform_super_admins(principal_id)` 建唯一索引
+`scope(tenant, principal, resource)` 返回：
 
-### Step 2: 实现 `Store` trait
+- `Scope::TenantOnly { tenant }`
+- `Scope::None`
 
-你只需实现三组 trait：`TenantStore`、`RoleStore`、`GlobalRoleStore`。
+超级管理员为平台级能力，但仍受 `tenant_active` 约束。
 
-```rust
-use async_trait::async_trait;
-use rs_tenant::{
-    GlobalRoleId, GlobalRoleStore, Permission, PrincipalId, RoleId, RoleStore,
-    StoreError, TenantId, TenantStore,
-};
+## Feature 开关
 
-pub struct DbStore {
-    // 你的数据库连接池
-}
-
-#[async_trait]
-impl TenantStore for DbStore {
-    async fn tenant_active(&self, tenant: TenantId) -> Result<bool, StoreError> {
-        // SELECT active FROM tenants WHERE id = ?
-        let _ = tenant;
-        todo!()
-    }
-
-    async fn principal_active(
-        &self,
-        tenant: TenantId,
-        principal: PrincipalId,
-    ) -> Result<bool, StoreError> {
-        // SELECT active FROM tenant_principals WHERE tenant_id = ? AND principal_id = ?
-        let _ = (tenant, principal);
-        todo!()
-    }
-}
-
-#[async_trait]
-impl RoleStore for DbStore {
-    async fn principal_roles(
-        &self,
-        tenant: TenantId,
-        principal: PrincipalId,
-    ) -> Result<Vec<RoleId>, StoreError> {
-        let _ = (tenant, principal);
-        todo!()
-    }
-
-    async fn role_permissions(
-        &self,
-        tenant: TenantId,
-        role: RoleId,
-    ) -> Result<Vec<Permission>, StoreError> {
-        let _ = (tenant, role);
-        todo!()
-    }
-
-    async fn role_inherits(
-        &self,
-        tenant: TenantId,
-        role: RoleId,
-    ) -> Result<Vec<RoleId>, StoreError> {
-        let _ = (tenant, role);
-        todo!()
-    }
-}
-
-#[async_trait]
-impl GlobalRoleStore for DbStore {
-    async fn global_roles(&self, principal: PrincipalId) -> Result<Vec<GlobalRoleId>, StoreError> {
-        let _ = principal;
-        todo!()
-    }
-
-    async fn global_role_permissions(
-        &self,
-        role: GlobalRoleId,
-    ) -> Result<Vec<Permission>, StoreError> {
-        let _ = role;
-        todo!()
-    }
-
-    async fn is_super_admin(&self, principal: PrincipalId) -> Result<bool, StoreError> {
-        // SELECT 1 FROM platform_super_admins WHERE principal_id = ?
-        let _ = principal;
-        todo!()
-    }
-}
+```toml
+[features]
+default = []
+serde = []
+memory-store = []
+memory-cache = []
+axum = []
+axum-jwt = []
+criterion-bench = []
+casbin = []
 ```
 
-### Step 3: 构建 `Engine`
+说明：
 
-```rust
-use rs_tenant::{EngineBuilder, MemoryCache};
-use std::time::Duration;
+- `axum-jwt` 依赖 `axum` 和 `serde`
+- `casbin` 当前仅保留 feature 开关，未提供公开适配 API
 
-fn build_engine(store: DbStore) -> rs_tenant::Engine<DbStore, MemoryCache> {
-    EngineBuilder::new(store)
-        .enable_role_hierarchy(true)
-        .enable_wildcard(true)
-        .enable_super_admin(true)
-        .max_inherit_depth(16)
-        .permission_normalize(true)
-        .cache(MemoryCache::new(10_000).with_ttl(Duration::from_secs(30)))
-        .build()
-}
-```
+## 生产集成建议
 
-配置建议：
-- `enable_role_hierarchy`：有角色继承就开
-- `enable_wildcard`：你允许 `*` 权限时再开
-- `enable_super_admin`：你确实实现平台超管时再开
-- `max_inherit_depth`：建议 8~32
-- `permission_normalize`：通常保持 `true`
+生产环境通常按以下步骤接入：
 
-### Step 4: 在应用服务里调用
+1. 设计权限数据模型（租户、主体、角色、权限、继承、全局角色、超级管理员）
+2. 实现三组 Store 接口：`TenantStore`、`RoleStore`、`GlobalRoleStore`
+3. 使用 `EngineBuilder` 组装引擎（继承/wildcard/super-admin/缓存）
+4. 在权限数据变更后执行缓存失效
 
-```rust
-use rs_tenant::{Decision, Permission, PrincipalId, TenantId};
+缓存失效接口：
 
-pub async fn check_invoice_read(
-    engine: &rs_tenant::Engine<DbStore, rs_tenant::MemoryCache>,
-    tenant: TenantId,
-    principal: PrincipalId,
-) -> rs_tenant::Result<bool> {
-    let permission = Permission::try_from("invoice:read")?;
-    let decision = engine.authorize(tenant, principal, permission).await?;
-
-    match decision {
-        Decision::Allow => Ok(true),
-        Decision::Deny => Ok(false),
-    }
-}
-```
-
-### Step 5: 做好缓存失效
-
-当权限数据变更后，调用缓存失效接口：
 - `invalidate_principal(tenant, principal)`
 - `invalidate_role(tenant, role)`
 - `invalidate_tenant(tenant)`
 
-如果你没有统一变更入口，建议先不用缓存，确认行为正确后再打开。
+## Axum 集成
 
-### Step 6: Axum 接入（可选）
+- 启用 `axum` 或 `axum-jwt` feature
+- 在请求扩展中注入 `AuthContext { tenant, principal }`
+- 使用 `AuthorizeLayer` 为路由绑定权限
+- 使用 JWT 时可配合 `JwtAuthLayer`
 
-1. 打开 feature：`axum`（或 `axum-jwt`）
-2. 请求进入后先放入 `AuthContext { tenant, principal }`
-3. 使用 `AuthorizeLayer` 为路由声明权限
+详细示例见 `docs/06-axum-integration.md`。
 
-使用 JWT 时，推荐顺序：
-- `.layer(AuthorizeLayer::new(...))`
-- `.layer(JwtAuthLayer::new(...))`
+## 文档目录
 
-这样 `JwtAuthLayer` 会先执行，先把 `AuthContext` 注入请求扩展，再执行授权层。
+完整中文文档见 `docs/`：
 
-## 8. 权限字符串规则
+- `docs/README.md`：文档首页
+- `docs/01-overview.md`：项目总览
+- `docs/02-domain-model.md`：领域模型与权限语义
+- `docs/03-authorization-flow.md`：授权流程详解
+- `docs/04-quickstart.md`：5 分钟接入
+- `docs/05-integration-production.md`：生产集成指南
+- `docs/06-axum-integration.md`：Axum/JWT 集成
+- `docs/07-examples.md`：典型案例
+- `docs/08-testing-benchmark.md`：测试与基准
+- `docs/09-faq-troubleshooting.md`：FAQ 与排查
 
-默认 `Permission` 规则：
-- 格式必须是 `resource:action`
-- 默认会 `trim + 小写化`
-- 不允许空段
-- 默认字符集：`a-z`、`0-9`、`_`、`-`、`:`
-- 通配符 `*` 仅在开启 `enable_wildcard(true)` 后参与匹配
-
-## 9. 测试与性能
-
-### 运行单元测试
+## 开发与测试命令
 
 ```bash
+# 默认测试
 cargo test --offline
+
+# 带内存存储/缓存测试
 cargo test --offline --features memory-store,memory-cache
-```
 
-### 运行手工性能测试
-
-```bash
+# 手工性能测试
 cargo test --offline --features memory-store,memory-cache --test perf -- --ignored --nocapture
-```
 
-### 运行 Criterion 基准
-
-```bash
+# Criterion 基准
 cargo bench --features criterion-bench,memory-store,memory-cache
 ```
 
-## 10. 设计边界与注意事项
+## 设计边界
 
-- 当前 `scope` 只有租户级结果：`TenantOnly` / `None`。
-- 超级管理员是平台级，但依然要求 `tenant_active = true`。
-- 库本身不做 ORM 绑定，不生成迁移，不托管业务模型。
-- 生产环境请优先实现你自己的 `Store`，`MemoryStore` 仅用于测试/演示。
+- 本库只负责授权决策与作用域计算，不负责业务数据模型
+- 不内置数据库迁移管理
+- `MemoryStore` 主要用于测试与演示
 
-## 11. 版本与兼容性建议
+## 贡献说明
 
-在接入方项目中建议：
-- 固定小版本（如 `0.1.x`）
-- 把权限规则和 `EngineBuilder` 参数做成集中配置
-- 升级版本前先跑回归：授权案例、越权案例、缓存失效案例
+欢迎提交 Issue 和 PR。提交前建议：
 
----
+1. 补充或更新相关测试
+2. 运行上述测试命令
+3. 若涉及性能路径，附上基准对比结果
 
-如果你准备把它接入真实业务，我可以继续帮你补一版“数据库表结构 + SQL 查询模板 + Store 实现骨架（按你现有 ORM）”。
+仓库贡献约定见 `AGENTS.md`。
