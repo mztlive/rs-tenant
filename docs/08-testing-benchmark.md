@@ -60,6 +60,37 @@ cargo test --offline --features memory-store,memory-cache --test perf -- --ignor
 
 说明：以上数据用于基线对比，不同机器、编译参数、系统负载下数值会变化。
 
+### Release 基准数据（2026-02-07）
+
+命令：
+
+```bash
+cargo test --release --offline --features memory-store,memory-cache --test perf -- --ignored --nocapture
+```
+
+结果（中位数）：
+
+| 场景 | 中位耗时 | ns/op | ops/s | 参数 |
+|---|---:|---:|---:|---|
+| `authorize_flat_no_cache` | 99.149 ms | 495.7 | 2,017,172 | iters=200000 |
+| `authorize_flat_hot_cache` | 77.860 ms | 389.3 | 2,568,708 | iters=200000 |
+| `scope_flat_hot_cache` | 75.475 ms | 377.4 | 2,649,893 | iters=200000 |
+| `authorize_hierarchy_depth8_no_cache` | 149.460 ms | 2989.2 | 334,537 | iters=50000 |
+| `authorize_flat_hot_cache_parallel_single_shard` | 498.317 ms | 1245.8 | 802,702 | threads=8, total_ops=400000 |
+| `authorize_flat_hot_cache_parallel_sharded` | 484.717 ms | 1211.8 | 825,224 | threads=8, total_ops=400000 |
+
+与前面的 Debug 基线相比（按 `ns/op`）：
+
+- `authorize_flat_no_cache`：约 `7.37x` 加速
+- `authorize_flat_hot_cache`：约 `6.90x` 加速
+- `scope_flat_hot_cache`：约 `6.68x` 加速
+- `authorize_hierarchy_depth8_no_cache`：约 `8.65x` 加速
+- 并发热缓存场景：约 `2.38x ~ 2.42x` 加速
+
+额外观察：
+
+- Release 下分片缓存对并发吞吐提升约 `2.8%`（`825,224` vs `802,702` ops/s）。
+
 ## 3) Criterion 基准
 
 ```bash
