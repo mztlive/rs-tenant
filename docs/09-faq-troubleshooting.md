@@ -1,6 +1,6 @@
 # 09. FAQ 与故障排查
 
-> 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](08-testing-benchmark.md)
+> 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](08-testing-benchmark.md) | [下一章](10-rs-tenant-vs-casbin.md)
 
 ## Q1: 为什么明明配了角色还是返回 `Deny`？
 
@@ -72,5 +72,6 @@ let engine = EngineBuilder::new(store).enable_wildcard(true).build();
 ## 继续阅读
 
 - [上一页：08. 测试与性能基准](08-testing-benchmark.md)
+- [下一页：10. rs-tenant 与 Casbin 对比](10-rs-tenant-vs-casbin.md)
 - [回到文档首页](README.md)
 - [返回目录](SUMMARY.md)

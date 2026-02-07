@@ -151,6 +151,7 @@ casbin = []
 - `docs/07-examples.md`：典型案例
 - `docs/08-testing-benchmark.md`：测试与基准
 - `docs/09-faq-troubleshooting.md`：FAQ 与排查
+- `docs/10-rs-tenant-vs-casbin.md`：与 Casbin 的区别与选型
 
 ## 文档发布（mdBook + GitHub Pages）
 

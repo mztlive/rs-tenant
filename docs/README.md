@@ -10,6 +10,7 @@
 - [生产环境集成指南](05-integration-production.md)
 - [Axum 与 JWT 集成](06-axum-integration.md)
 - [FAQ 与故障排查](09-faq-troubleshooting.md)
+- [rs-tenant 与 Casbin 对比](10-rs-tenant-vs-casbin.md)
 
 ## 你将学到什么
 
@@ -31,9 +32,10 @@
 1. `01-overview.md`
 2. `02-domain-model.md`
 3. `03-authorization-flow.md`
-4. `05-integration-production.md`
-5. `08-testing-benchmark.md`
-6. `09-faq-troubleshooting.md`
+4. `10-rs-tenant-vs-casbin.md`
+5. `05-integration-production.md`
+6. `08-testing-benchmark.md`
+7. `09-faq-troubleshooting.md`
 
 ## 版本与范围说明
 
