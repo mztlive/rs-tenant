@@ -117,6 +117,56 @@ cargo bench --features criterion-bench,memory-store,memory-cache
 - 角色扇出规模影响
 - `scope` 允许/拒绝路径
 
+### Criterion 当前数据（2026-02-07）
+
+命令：
+
+```bash
+cargo bench --features criterion-bench,memory-store,memory-cache --bench criterion_engine -- --noplot
+```
+
+平面授权与 scope：
+
+| 场景 | time 区间 | thrpt 区间 |
+|---|---|---|
+| `authorize_flat/authorize_no_cache` | `468.21 ns ~ 470.80 ns` | `2.1240 ~ 2.1358 Melem/s` |
+| `authorize_flat/scope_no_cache` | `456.95 ns ~ 459.24 ns` | `2.1775 ~ 2.1884 Melem/s` |
+| `authorize_flat/authorize_cache_single_shard` | `299.62 ns ~ 301.69 ns` | `3.3146 ~ 3.3375 Melem/s` |
+| `authorize_flat/scope_cache_single_shard` | `290.08 ns ~ 291.20 ns` | `3.4341 ~ 3.4473 Melem/s` |
+| `authorize_flat/authorize_cache_sharded` | `304.73 ns ~ 306.85 ns` | `3.2590 ~ 3.2816 Melem/s` |
+| `authorize_flat/scope_cache_sharded` | `292.18 ns ~ 293.92 ns` | `3.4023 ~ 3.4225 Melem/s` |
+
+继承深度：
+
+| 深度 | time 区间 | thrpt 区间 |
+|---:|---|---|
+| `1` | `969.12 ns ~ 975.67 ns` | `1.0249 ~ 1.0319 Melem/s` |
+| `4` | `1.8722 µs ~ 1.9010 µs` | `526.04 ~ 534.13 Kelem/s` |
+| `8` | `3.0877 µs ~ 3.1748 µs` | `314.98 ~ 323.86 Kelem/s` |
+| `16` | `5.5525 µs ~ 5.7532 µs` | `173.81 ~ 180.10 Kelem/s` |
+
+角色扇出：
+
+| 角色数 | time 区间 | thrpt 区间 |
+|---:|---|---|
+| `1` | `481.16 ns ~ 482.61 ns` | `2.0721 ~ 2.0783 Melem/s` |
+| `8` | `1.8782 µs ~ 1.8912 µs` | `528.75 ~ 532.43 Kelem/s` |
+| `32` | `6.7737 µs ~ 6.8142 µs` | `146.75 ~ 147.63 Kelem/s` |
+| `128` | `25.740 µs ~ 25.855 µs` | `38.677 ~ 38.850 Kelem/s` |
+
+scope 行为：
+
+| 场景 | time 区间 | thrpt 区间 |
+|---|---|---|
+| `scope_behavior/scope_allow` | `293.87 ns ~ 295.34 ns` | `3.3859 ~ 3.4028 Melem/s` |
+| `scope_behavior/scope_deny` | `269.47 ns ~ 272.46 ns` | `3.6703 ~ 3.7110 Melem/s` |
+
+简要结论：
+
+1. 热缓存路径稳定在 `~300ns` 量级，吞吐约 `3.3 Melem/s`。
+2. 继承深度与角色扇出增长时，延迟近似线性上升。
+3. `scope_deny` 略快于 `scope_allow`，符合匹配路径短路预期。
+
 ## 4) 回归验证建议
 
 每次权限相关改动后，建议至少验证以下场景：
