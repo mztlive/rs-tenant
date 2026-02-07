@@ -106,6 +106,19 @@ define_id_type!(
     "global role id"
 );
 
+impl PrincipalId {
+    /// Creates a principal id from `kind` and `account_id` segments.
+    ///
+    /// Both segments are validated by [`PrincipalId::new`]. Callers should pass
+    /// semantic pieces such as `("admin", "user_1")` instead of formatting
+    /// the raw id string at call sites.
+    pub fn try_from_parts(kind: impl AsRef<str>, account_id: impl AsRef<str>) -> Result<Self> {
+        let kind = validate_simple_name(kind.as_ref(), "principal kind")?;
+        let account_id = validate_simple_name(account_id.as_ref(), "principal account id")?;
+        Self::new(format!("{kind}:{account_id}"))
+    }
+}
+
 /// Resource name used for scope checks.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -158,5 +171,28 @@ impl TryFrom<&str> for ResourceName {
 impl From<String> for ResourceName {
     fn from(value: String) -> Self {
         Self::from_string(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PrincipalId;
+
+    #[test]
+    fn principal_id_try_from_parts_success() {
+        let principal = PrincipalId::try_from_parts("admin", "user_1").expect("principal id");
+        assert_eq!(principal.as_str(), "admin:user_1");
+    }
+
+    #[test]
+    fn principal_id_try_from_parts_rejects_empty_segment() {
+        let err = PrincipalId::try_from_parts("admin", "   ").expect_err("must reject");
+        assert!(err.to_string().contains("principal account id"));
+    }
+
+    #[test]
+    fn principal_id_try_from_parts_rejects_invalid_chars() {
+        let err = PrincipalId::try_from_parts("ad min", "user_1").expect_err("must reject");
+        assert!(err.to_string().contains("principal kind"));
     }
 }
