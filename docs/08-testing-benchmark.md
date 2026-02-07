@@ -44,19 +44,19 @@ cargo test --offline --features memory-store,memory-cache --test perf -- --ignor
 
 | 场景 | 中位耗时 | ns/op | ops/s | 参数 |
 |---|---:|---:|---:|---|
-| `authorize_flat_no_cache` | 730.550 ms | 3652.8 | 273,766 | iters=200000 |
-| `authorize_flat_hot_cache` | 537.541 ms | 2687.7 | 372,065 | iters=200000 |
-| `scope_flat_hot_cache` | 503.921 ms | 2519.6 | 396,888 | iters=200000 |
-| `authorize_hierarchy_depth8_no_cache` | 1292.247 ms | 25844.9 | 38,692 | iters=50000 |
-| `authorize_flat_hot_cache_parallel_single_shard` | 1184.560 ms | 2961.4 | 337,678 | threads=8, total_ops=400000 |
-| `authorize_flat_hot_cache_parallel_sharded` | 1173.053 ms | 2932.6 | 340,991 | threads=8, total_ops=400000 |
+| `authorize_flat_no_cache` | 753.822 ms | 3769.1 | 265,315 | iters=200000 |
+| `authorize_flat_hot_cache` | 480.928 ms | 2404.6 | 415,862 | iters=200000 |
+| `scope_flat_hot_cache` | 430.631 ms | 2153.2 | 464,435 | iters=200000 |
+| `authorize_hierarchy_depth8_no_cache` | 1304.109 ms | 26082.2 | 38,340 | iters=50000 |
+| `authorize_flat_hot_cache_parallel_single_shard` | 158.165 ms | 395.4 | 2,529,003 | threads=8, total_ops=400000 |
+| `authorize_flat_hot_cache_parallel_sharded` | 156.065 ms | 390.2 | 2,563,038 | threads=8, total_ops=400000 |
 
 简要解读：
 
-1. 热缓存下 `authorize` 吞吐较无缓存提升明显（约 35.9%）。
+1. 热缓存下 `authorize` 吞吐较无缓存提升明显（约 56.7%）。
 2. `scope` 热缓存路径略快于 `authorize` 热缓存路径。
 3. 深度继承（depth=8）会显著拉高单次授权开销。
-4. 并发下分片缓存相比单分片有小幅提升（本次约 1%）。
+4. 并发热缓存场景吞吐达 `2.54M ops/s` 量级，分片与单分片接近（该压测为单 key 热点）。
 
 说明：以上数据用于基线对比，不同机器、编译参数、系统负载下数值会变化。
 
@@ -72,24 +72,38 @@ cargo test --release --offline --features memory-store,memory-cache --test perf 
 
 | 场景 | 中位耗时 | ns/op | ops/s | 参数 |
 |---|---:|---:|---:|---|
-| `authorize_flat_no_cache` | 99.149 ms | 495.7 | 2,017,172 | iters=200000 |
-| `authorize_flat_hot_cache` | 77.860 ms | 389.3 | 2,568,708 | iters=200000 |
-| `scope_flat_hot_cache` | 75.475 ms | 377.4 | 2,649,893 | iters=200000 |
-| `authorize_hierarchy_depth8_no_cache` | 149.460 ms | 2989.2 | 334,537 | iters=50000 |
-| `authorize_flat_hot_cache_parallel_single_shard` | 498.317 ms | 1245.8 | 802,702 | threads=8, total_ops=400000 |
-| `authorize_flat_hot_cache_parallel_sharded` | 484.717 ms | 1211.8 | 825,224 | threads=8, total_ops=400000 |
+| `authorize_flat_no_cache` | 101.428 ms | 507.1 | 1,971,836 | iters=200000 |
+| `authorize_flat_hot_cache` | 68.966 ms | 344.8 | 2,899,967 | iters=200000 |
+| `scope_flat_hot_cache` | 65.979 ms | 329.9 | 3,031,271 | iters=200000 |
+| `authorize_hierarchy_depth8_no_cache` | 151.994 ms | 3039.9 | 328,961 | iters=50000 |
+| `authorize_flat_hot_cache_parallel_single_shard` | 169.730 ms | 424.3 | 2,356,688 | threads=8, total_ops=400000 |
+| `authorize_flat_hot_cache_parallel_sharded` | 141.443 ms | 353.6 | 2,827,998 | threads=8, total_ops=400000 |
 
-与前面的 Debug 基线相比（按 `ns/op`）：
+与上方 Debug 数据相比（按 `ns/op`）：
 
-- `authorize_flat_no_cache`：约 `7.37x` 加速
-- `authorize_flat_hot_cache`：约 `6.90x` 加速
-- `scope_flat_hot_cache`：约 `6.68x` 加速
-- `authorize_hierarchy_depth8_no_cache`：约 `8.65x` 加速
-- 并发热缓存场景：约 `2.38x ~ 2.42x` 加速
+- `authorize_flat_no_cache`：约 `7.34x` 加速
+- `authorize_flat_hot_cache`：约 `6.97x` 加速
+- `scope_flat_hot_cache`：约 `6.53x` 加速
+- `authorize_hierarchy_depth8_no_cache`：约 `8.58x` 加速
+- 并发热缓存场景：约 `0.93x ~ 1.10x`（该项波动较大，建议看多轮中位数）
 
-额外观察：
+### 优化前后关键对比（以 2026-02-07 早先基线为参照）
 
-- Release 下分片缓存对并发吞吐提升约 `2.8%`（`825,224` vs `802,702` ops/s）。
+本轮不改对外 API 的内部优化后，核心收益集中在并发热缓存路径：
+
+- Debug `parallel_single_shard`：`337,678 -> 2,529,003 ops/s`（约 `7.49x`）
+- Debug `parallel_sharded`：`340,991 -> 2,563,038 ops/s`（约 `7.52x`）
+- Release `parallel_single_shard`：`802,702 -> 2,356,688 ops/s`（约 `2.94x`）
+- Release `parallel_sharded`：`825,224 -> 2,827,998 ops/s`（约 `3.43x`）
+
+同时单线程热缓存也有改进：
+
+- Debug `authorize_flat_hot_cache`：`2687.7 -> 2404.6 ns/op`（约 `10.5%` 提升）
+- Release `authorize_flat_hot_cache`：`389.3 -> 344.8 ns/op`（约 `11.4%` 提升）
+
+代价与取舍：
+
+- 无缓存路径和深继承路径存在小幅波动（约 `1%~3%`），本轮优化主要换取并发热缓存吞吐。
 
 ## 3) Criterion 基准
 

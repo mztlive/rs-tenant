@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -18,7 +18,7 @@ const MAX_DEFAULT_SHARDS: usize = 16;
 /// Each shard maintains its own LRU queue and TTL checks.
 #[derive(Debug, Clone)]
 pub struct MemoryCache {
-    shards: Arc<Vec<Mutex<CacheState>>>,
+    shards: Arc<Vec<RwLock<CacheState>>>,
     shard_capacities: Arc<Vec<usize>>,
     shard_count: usize,
     capacity: usize,
@@ -98,9 +98,9 @@ impl MemoryCache {
         requested.max(1).min(capacity)
     }
 
-    fn new_shards(shard_count: usize) -> Vec<Mutex<CacheState>> {
+    fn new_shards(shard_count: usize) -> Vec<RwLock<CacheState>> {
         (0..shard_count)
-            .map(|_| Mutex::new(CacheState::default()))
+            .map(|_| RwLock::new(CacheState::default()))
             .collect()
     }
 
@@ -130,8 +130,15 @@ impl MemoryCache {
         (hasher.finish() as usize) % self.shard_count
     }
 
-    fn lock_shard(&self, shard_index: usize) -> MutexGuard<'_, CacheState> {
-        match self.shards[shard_index].lock() {
+    fn read_shard(&self, shard_index: usize) -> RwLockReadGuard<'_, CacheState> {
+        match self.shards[shard_index].read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn write_shard(&self, shard_index: usize) -> RwLockWriteGuard<'_, CacheState> {
+        match self.shards[shard_index].write() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
@@ -144,6 +151,9 @@ impl MemoryCache {
     }
 
     fn touch(state: &mut CacheState, key: &CacheKey) {
+        if state.order.back().is_some_and(|last| last == key) {
+            return;
+        }
         state.order.retain(|existing| existing != key);
         state.order.push_back(key.clone());
     }
@@ -176,15 +186,8 @@ impl MemoryCache {
     }
 
     fn invalidate_tenant_inner(state: &mut CacheState, tenant: &TenantId) {
-        let keys: Vec<CacheKey> = state
-            .entries
-            .keys()
-            .filter(|key| &key.tenant == tenant)
-            .cloned()
-            .collect();
-        for key in keys {
-            Self::remove_key(state, &key);
-        }
+        state.entries.retain(|key, _| &key.tenant != tenant);
+        state.order.retain(|key| state.entries.contains_key(key));
     }
 }
 
@@ -202,8 +205,22 @@ impl Cache for MemoryCache {
         let key = Self::key(tenant, principal);
         let now = Instant::now();
         let shard_index = self.shard_index(&key);
-        let mut guard = self.lock_shard(shard_index);
+        {
+            let guard = self.read_shard(shard_index);
+            if let Some(entry) = guard.entries.get(&key) {
+                if let Some(ttl) = self.ttl
+                    && Self::is_expired(entry, ttl, now)
+                {
+                    // Write lock is required to remove expired entries.
+                } else if guard.order.back().is_some_and(|last| last == &key) {
+                    return Some(entry.perms.clone());
+                }
+            } else {
+                return None;
+            }
+        }
 
+        let mut guard = self.write_shard(shard_index);
         if let Some(ttl) = self.ttl
             && let Some(entry) = guard.entries.get(&key)
             && Self::is_expired(entry, ttl, now)
@@ -211,7 +228,6 @@ impl Cache for MemoryCache {
             Self::remove_key(&mut guard, &key);
             return None;
         }
-
         let perms = guard.entries.get(&key).map(|entry| entry.perms.clone());
         if perms.is_some() {
             Self::touch(&mut guard, &key);
@@ -232,7 +248,7 @@ impl Cache for MemoryCache {
         let key = Self::key(tenant, principal);
         let now = Instant::now();
         let shard_index = self.shard_index(&key);
-        let mut guard = self.lock_shard(shard_index);
+        let mut guard = self.write_shard(shard_index);
 
         if let Some(ttl) = self.ttl {
             Self::prune_expired(&mut guard, ttl, now);
@@ -253,21 +269,21 @@ impl Cache for MemoryCache {
     async fn invalidate_principal(&self, tenant: &TenantId, principal: &PrincipalId) {
         let key = Self::key(tenant, principal);
         let shard_index = self.shard_index(&key);
-        let mut guard = self.lock_shard(shard_index);
+        let mut guard = self.write_shard(shard_index);
         Self::remove_key(&mut guard, &key);
     }
 
     async fn invalidate_role(&self, tenant: &TenantId, _role: &RoleId) {
         // Role-to-principal relationships are unknown here, so we invalidate the tenant scope.
         for shard_index in 0..self.shard_count {
-            let mut guard = self.lock_shard(shard_index);
+            let mut guard = self.write_shard(shard_index);
             Self::invalidate_tenant_inner(&mut guard, tenant);
         }
     }
 
     async fn invalidate_tenant(&self, tenant: &TenantId) {
         for shard_index in 0..self.shard_count {
-            let mut guard = self.lock_shard(shard_index);
+            let mut guard = self.write_shard(shard_index);
             Self::invalidate_tenant_inner(&mut guard, tenant);
         }
     }
@@ -340,7 +356,7 @@ mod tests {
         let cache = MemoryCache::new(1);
         let shards = Arc::clone(&cache.shards);
         let _ = std::thread::spawn(move || {
-            let _guard = shards[0].lock().unwrap();
+            let _guard = shards[0].write().unwrap();
             panic!("poison cache lock");
         })
         .join();
