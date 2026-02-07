@@ -2,6 +2,23 @@
 name = "rs-tenant"
 version = "0.1.0"
 edition = "2024"
+description = "Multi-tenant RBAC authorization engine for Rust"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/huang-jia-jiang/rs-tenant"
+homepage = "https://github.com/huang-jia-jiang/rs-tenant"
+documentation = "https://docs.rs/rs-tenant"
+readme = "README.md"
+keywords = ["rbac", "multi-tenant", "authorization", "axum", "permissions"]
+categories = ["authentication", "web-programming"]
+exclude = [
+    ".agents/**",
+    ".github/**",
+    "docs/**",
+    ".gitbook.yaml",
+    "book.toml",
+    "AGENTS.md",
+    "readme.md",
+]
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"], optional = true }
