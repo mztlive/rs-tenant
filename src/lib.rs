@@ -52,8 +52,8 @@ pub use crate::cache::{Cache, NoCache};
 pub use crate::engine::{Decision, Engine, EngineBuilder, Scope};
 pub use crate::error::{Error, Result, StoreError};
 pub use crate::permission::{DefaultPermissionValidator, Permission, PermissionValidator};
-pub use crate::store::{GlobalRoleStore, RoleStore, Store, TenantStore};
-pub use crate::types::{GlobalRoleId, PrincipalId, ResourceName, RoleId, TenantId};
+pub use crate::store::{GlobalRoleStore, RoleStore, ScopeStore, Store, TenantStore};
+pub use crate::types::{GlobalRoleId, PrincipalId, ResourceName, RoleId, ScopePath, TenantId};
 
 #[cfg(feature = "memory-store")]
 pub use crate::memory_store::MemoryStore;

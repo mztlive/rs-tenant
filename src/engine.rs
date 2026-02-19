@@ -1,8 +1,8 @@
 use crate::cache::{Cache, NoCache};
 use crate::error::{Error, Result};
 use crate::permission::{Permission, permission_matches, resource_matches};
-use crate::store::Store;
-use crate::types::{PrincipalId, ResourceName, RoleId, TenantId};
+use crate::store::{ScopeStore, Store};
+use crate::types::{PrincipalId, ResourceName, RoleId, ScopePath, TenantId};
 use std::collections::HashSet;
 
 const CACHE_SIGNATURE_PREFIX: &str = "__rs_tenant_cache_sig__=";
@@ -349,12 +349,58 @@ where
     }
 }
 
+impl<S, C> Engine<S, C>
+where
+    S: Store + ScopeStore,
+    C: Cache,
+{
+    /// Authorizes a principal for a permission and target scope within a tenant.
+    pub async fn authorize_with_scope(
+        &self,
+        tenant: TenantId,
+        principal: PrincipalId,
+        permission: Permission,
+        target_scope: ScopePath,
+    ) -> Result<Decision> {
+        self.authorize_with_scope_ref(&tenant, &principal, &permission, &target_scope)
+            .await
+    }
+
+    /// Authorizes a principal for a permission and target scope within a tenant.
+    pub async fn authorize_with_scope_ref(
+        &self,
+        tenant: &TenantId,
+        principal: &PrincipalId,
+        permission: &Permission,
+        target_scope: &ScopePath,
+    ) -> Result<Decision> {
+        let decision = self.authorize_ref(tenant, principal, permission).await?;
+        if decision == Decision::Deny {
+            return Ok(Decision::Deny);
+        }
+
+        if self.enable_super_admin && self.store.is_super_admin_ref(principal).await? {
+            return Ok(Decision::Allow);
+        }
+
+        let allowed = self
+            .store
+            .scope_allows_ref(tenant, principal, target_scope)
+            .await?;
+        Ok(if allowed {
+            Decision::Allow
+        } else {
+            Decision::Deny
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::permission::Permission;
-    use crate::store::{GlobalRoleStore, RoleStore, TenantStore};
-    use crate::types::{GlobalRoleId, PrincipalId, ResourceName, RoleId, TenantId};
+    use crate::store::{GlobalRoleStore, RoleStore, ScopeStore, TenantStore};
+    use crate::types::{GlobalRoleId, PrincipalId, ResourceName, RoleId, ScopePath, TenantId};
     use async_trait::async_trait;
     use futures::executor::block_on;
     use std::collections::HashMap;
@@ -369,6 +415,7 @@ mod tests {
         role_inherits: HashMap<RoleId, Vec<RoleId>>,
         global_roles: HashMap<PrincipalId, Vec<GlobalRoleId>>,
         global_role_permissions: HashMap<GlobalRoleId, Vec<Permission>>,
+        principal_scopes: HashMap<PrincipalId, ScopePath>,
     }
 
     fn active_store() -> TestStore {
@@ -461,6 +508,17 @@ mod tests {
             _principal: PrincipalId,
         ) -> std::result::Result<bool, crate::StoreError> {
             Ok(self.super_admin)
+        }
+    }
+
+    #[async_trait]
+    impl ScopeStore for TestStore {
+        async fn principal_scope_path(
+            &self,
+            _tenant: TenantId,
+            principal: PrincipalId,
+        ) -> std::result::Result<Option<ScopePath>, crate::StoreError> {
+            Ok(self.principal_scopes.get(&principal).cloned())
         }
     }
 
@@ -569,6 +627,62 @@ mod tests {
         .unwrap();
 
         assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn authorize_with_scope_should_allow_when_scope_is_ancestor() {
+        let mut store = active_store();
+
+        let principal = principal("user_1");
+        store.principal_scopes.insert(
+            principal.clone(),
+            ScopePath::new("agent/123").expect("scope path"),
+        );
+
+        let role = RoleId::try_from("role_a").unwrap();
+        store.roles = vec![role.clone()];
+        store
+            .role_permissions
+            .insert(role, vec![Permission::try_from("invoice:read").unwrap()]);
+
+        let engine = EngineBuilder::new(store).build();
+        let decision = block_on(engine.authorize_with_scope(
+            TenantId::try_from("tenant_1").unwrap(),
+            principal,
+            Permission::try_from("invoice:read").unwrap(),
+            ScopePath::new("agent/123/store/456").expect("scope path"),
+        ))
+        .unwrap();
+
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn authorize_with_scope_should_deny_when_scope_not_allowed() {
+        let mut store = active_store();
+
+        let principal = principal("user_1");
+        store.principal_scopes.insert(
+            principal.clone(),
+            ScopePath::new("agent/123/store/111").expect("scope path"),
+        );
+
+        let role = RoleId::try_from("role_a").unwrap();
+        store.roles = vec![role.clone()];
+        store
+            .role_permissions
+            .insert(role, vec![Permission::try_from("invoice:read").unwrap()]);
+
+        let engine = EngineBuilder::new(store).build();
+        let decision = block_on(engine.authorize_with_scope(
+            TenantId::try_from("tenant_1").unwrap(),
+            principal,
+            Permission::try_from("invoice:read").unwrap(),
+            ScopePath::new("agent/123/store/456").expect("scope path"),
+        ))
+        .unwrap();
+
+        assert_eq!(decision, Decision::Deny);
     }
 
     #[test]

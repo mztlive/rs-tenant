@@ -5,6 +5,7 @@ Rust 多租户 RBAC 授权库。
 `rs-tenant` 提供一个可插拔的授权引擎，目标是将“权限决策”与“业务存储实现”解耦：
 
 - 在租户上下文内进行授权判定：`authorize`
+- 在租户上下文内进行“权限 + 目标层级作用域”联合判定：`authorize_with_scope`
 - 在查询前计算可访问范围：`scope`
 - 通过 `Store` trait 接入任意数据库/缓存
 
@@ -31,6 +32,7 @@ Rust 多租户 RBAC 授权库。
 - 可选角色继承（含环检测、深度限制）
 - 可选 wildcard（如 `*:*`、`invoice:*`）
 - 可选超级管理员短路授权
+- 层级作用域授权（`ScopePath` + `ScopeStore`，支持祖先路径放行）
 - 可选内存缓存（TTL、LRU、分片）
 - Axum 中间件集成（可选 JWT 解析）
 
@@ -92,6 +94,15 @@ cargo test --offline --features memory-store,memory-cache
 - `Scope::TenantOnly { tenant }`
 - `Scope::None`
 
+`authorize_with_scope(tenant, principal, permission, target_scope)` 执行顺序：
+
+1. 先执行 `authorize` 全流程（租户、主体、角色/全局角色权限匹配）
+2. 若 `authorize = Deny`，直接返回 `Deny`
+3. 若开启 super-admin 且命中，直接返回 `Allow`
+4. 否则调用 `ScopeStore::scope_allows` 校验目标层级作用域，命中返回 `Allow`，否则 `Deny`
+
+默认 `scope_allows` 语义为“主体作用域与目标作用域相等或为其祖先路径”。
+
 超级管理员为平台级能力，但仍受 `tenant_active` 约束。
 
 ## Feature 开关
@@ -118,7 +129,7 @@ casbin = []
 生产环境通常按以下步骤接入：
 
 1. 设计权限数据模型（租户、主体、角色、权限、继承、全局角色、超级管理员）
-2. 实现三组 Store 接口：`TenantStore`、`RoleStore`、`GlobalRoleStore`
+2. 实现 Store 接口：`TenantStore`、`RoleStore`、`GlobalRoleStore`（需要层级作用域控制时再实现 `ScopeStore`）
 3. 使用 `EngineBuilder` 组装引擎（继承/wildcard/super-admin/缓存）
 4. 在权限数据变更后执行缓存失效
 

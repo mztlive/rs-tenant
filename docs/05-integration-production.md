@@ -11,6 +11,7 @@
 - `tenants(id, active)`
 - `tenant_principals(tenant_id, principal_id, active)`
 - `tenant_principal_roles(tenant_id, principal_id, role_id)`
+- `tenant_principal_scopes(tenant_id, principal_id, scope_path)`（可选：仅层级作用域授权需要）
 - `tenant_role_permissions(tenant_id, role_id, permission)`
 - `tenant_role_inherits(tenant_id, role_id, parent_role_id)`
 - `global_principal_roles(principal_id, global_role_id)`
@@ -23,13 +24,14 @@
 
 ## Step 2: 实现 Store trait
 
-你需要实现三组接口：`TenantStore`、`RoleStore`、`GlobalRoleStore`。
+你需要实现三组接口：`TenantStore`、`RoleStore`、`GlobalRoleStore`。  
+如果你使用 `authorize_with_scope`，还需要实现 `ScopeStore`。
 
 ```rust
 use async_trait::async_trait;
 use rs_tenant::{
     GlobalRoleId, GlobalRoleStore, Permission, PrincipalId, RoleId, RoleStore, StoreError,
-    TenantId, TenantStore,
+    ScopePath, ScopeStore, TenantId, TenantStore,
 };
 
 pub struct DbStore {
@@ -103,6 +105,19 @@ impl GlobalRoleStore for DbStore {
         Ok(false)
     }
 }
+
+#[async_trait]
+impl ScopeStore for DbStore {
+    async fn principal_scope_path(
+        &self,
+        tenant: TenantId,
+        principal: PrincipalId,
+    ) -> Result<Option<ScopePath>, StoreError> {
+        let _ = (tenant, principal);
+        // 例如从 tenant_principal_scopes 读取
+        Ok(None)
+    }
+}
 ```
 
 ## Step 3: 构建 Engine
@@ -135,6 +150,25 @@ pub async fn can_read_invoice(
 ) -> rs_tenant::Result<bool> {
     let p = Permission::try_from("invoice:read")?;
     let d = engine.authorize(tenant, principal, p).await?;
+    Ok(matches!(d, Decision::Allow))
+}
+```
+
+如果需要“权限 + 层级作用域”联合判定，可改用：
+
+```rust
+use rs_tenant::ScopePath;
+
+pub async fn can_read_invoice_in_scope(
+    engine: &rs_tenant::Engine<DbStore, rs_tenant::MemoryCache>,
+    tenant: TenantId,
+    principal: PrincipalId,
+    target_scope: ScopePath,
+) -> rs_tenant::Result<bool> {
+    let p = Permission::try_from("invoice:read")?;
+    let d = engine
+        .authorize_with_scope(tenant, principal, p, target_scope)
+        .await?;
     Ok(matches!(d, Decision::Allow))
 }
 ```

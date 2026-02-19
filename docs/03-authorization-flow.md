@@ -17,6 +17,18 @@
 
 其中第 1、2、3 步是短路逻辑：前置失败时不会继续执行后续步骤。
 
+## `authorize_with_scope` 执行顺序
+
+调用：`authorize_with_scope(tenant, principal, permission, target_scope)`
+
+1. 先执行 `authorize(tenant, principal, permission)`
+2. 若结果是 `Deny`，直接返回 `Deny`
+3. 若开启 super-admin 且命中，直接返回 `Allow`
+4. 调用 `ScopeStore::scope_allows(tenant, principal, target_scope)` 做层级作用域校验
+5. 命中返回 `Allow`，否则 `Deny`
+
+默认 `scope_allows` 规则为“主体作用域与目标作用域相等，或主体作用域是目标作用域祖先路径”。
+
 ## `scope` 执行顺序
 
 调用：`scope(tenant, principal, resource)`
@@ -58,6 +70,7 @@
 4. 权限字符串格式错误（不是 `resource:action`）
 5. 角色继承深度过小或存在环
 6. 缓存未失效导致读取旧权限
+7. `authorize_with_scope` 的目标作用域不在主体可访问路径内
 
 ## 继续阅读
 

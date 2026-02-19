@@ -11,6 +11,7 @@
 - `Permission`：权限字符串，格式 `resource:action`
 - `Decision`：`Allow` 或 `Deny`
 - `Scope`：`TenantOnly { tenant }` 或 `None`
+- `ScopePath`：层级作用域路径（例如 `agent/123/store/456`）
 
 这些对象在库内都用强类型 ID 包装（如 `TenantId`、`PrincipalId`），减少字符串混用导致的授权错误。
 
@@ -60,6 +61,19 @@
 3. 当前租户 `tenant_active == true`
 
 命中后会跳过普通角色权限计算，直接 `Allow`（或 `scope` 返回 `TenantOnly`）。
+
+## 层级作用域语义（`ScopePath`）
+
+当你需要“同一权限在不同组织层级下可见范围不同”时，可使用 `authorize_with_scope` 与 `ScopePath`。
+
+- `ScopePath` 默认使用 `/` 分段，例如：`agent/123/store/456`
+- 默认匹配规则：主体作用域与目标作用域“相等或祖先路径”才放行
+- 该规则由 `ScopeStore::scope_allows` 提供默认实现，也可由业务自定义覆盖
+
+例如主体作用域为 `agent/123`：
+
+- 访问 `agent/123/store/456`：允许
+- 访问 `agent/999/store/456`：拒绝
 
 ## 继续阅读
 

@@ -3,6 +3,7 @@ use std::borrow::Borrow;
 use std::fmt;
 
 const MAX_NAME_LEN: usize = 128;
+const MAX_SCOPE_PATH_LEN: usize = 256;
 
 fn validate_simple_name(value: &str, kind: &str) -> Result<String> {
     let trimmed = value.trim();
@@ -174,9 +175,105 @@ impl From<String> for ResourceName {
     }
 }
 
+/// Hierarchical scope path used by resource-level access checks.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
+pub struct ScopePath(String);
+
+impl ScopePath {
+    /// Creates a validated scope path.
+    pub fn new(value: impl AsRef<str>) -> Result<Self> {
+        let value = value.as_ref().trim();
+        if value.is_empty() {
+            return Err(Error::InvalidId("scope path must not be empty".to_string()));
+        }
+        if value.len() > MAX_SCOPE_PATH_LEN {
+            return Err(Error::InvalidId(format!(
+                "scope path length must be <= {MAX_SCOPE_PATH_LEN}"
+            )));
+        }
+
+        for segment in value.split('/') {
+            if segment.is_empty() {
+                return Err(Error::InvalidId(
+                    "scope path contains empty segment".to_string(),
+                ));
+            }
+            if !segment
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+            {
+                return Err(Error::InvalidId(
+                    "scope path contains invalid characters".to_string(),
+                ));
+            }
+        }
+
+        Ok(Self(value.to_string()))
+    }
+
+    /// Creates a scope path from a trusted string without validation.
+    pub fn from_string(value: String) -> Self {
+        Self(value)
+    }
+
+    /// Returns the underlying string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns whether `self` is an ancestor scope of `other`.
+    pub fn is_ancestor_of(&self, other: &ScopePath) -> bool {
+        if self == other {
+            return false;
+        }
+
+        let self_prefix = format!("{}/", self.0);
+        other.0.starts_with(&self_prefix)
+    }
+
+    /// Returns whether `self` can access `other` under ancestor rules.
+    pub fn allows(&self, other: &ScopePath) -> bool {
+        self == other || self.is_ancestor_of(other)
+    }
+}
+
+impl fmt::Display for ScopePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for ScopePath {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for ScopePath {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for ScopePath {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<String> for ScopePath {
+    fn from(value: String) -> Self {
+        Self::from_string(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::PrincipalId;
+    use super::{PrincipalId, ScopePath};
 
     #[test]
     fn principal_id_try_from_parts_success() {
@@ -194,5 +291,14 @@ mod tests {
     fn principal_id_try_from_parts_rejects_invalid_chars() {
         let err = PrincipalId::try_from_parts("ad min", "user_1").expect_err("must reject");
         assert!(err.to_string().contains("principal kind"));
+    }
+
+    #[test]
+    fn scope_path_should_allow_ancestor_access() {
+        let parent = ScopePath::new("agent/123").expect("scope path");
+        let child = ScopePath::new("agent/123/store/456").expect("scope path");
+
+        assert!(parent.allows(&child));
+        assert!(!child.allows(&parent));
     }
 }

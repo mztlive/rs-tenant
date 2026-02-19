@@ -1,6 +1,6 @@
 use crate::error::StoreError;
 use crate::permission::Permission;
-use crate::types::{GlobalRoleId, PrincipalId, RoleId, TenantId};
+use crate::types::{GlobalRoleId, PrincipalId, RoleId, ScopePath, TenantId};
 use async_trait::async_trait;
 
 /// Store interface for tenant and principal activation.
@@ -149,6 +149,60 @@ pub trait GlobalRoleStore {
         principal: &PrincipalId,
     ) -> std::result::Result<bool, StoreError> {
         self.is_super_admin(principal.clone()).await
+    }
+}
+
+/// Store interface for hierarchical scope checks.
+#[async_trait]
+pub trait ScopeStore {
+    /// Returns scope path of a principal within a tenant.
+    ///
+    /// The returned scope path should represent the principal's accessible root.
+    /// Return `None` when the principal does not have a hierarchical scope root.
+    async fn principal_scope_path(
+        &self,
+        tenant: TenantId,
+        principal: PrincipalId,
+    ) -> std::result::Result<Option<ScopePath>, StoreError>;
+
+    /// Returns scope path of a principal using borrowed identifiers.
+    ///
+    /// Default implementation clones and delegates to [`principal_scope_path`].
+    async fn principal_scope_path_ref(
+        &self,
+        tenant: &TenantId,
+        principal: &PrincipalId,
+    ) -> std::result::Result<Option<ScopePath>, StoreError> {
+        self.principal_scope_path(tenant.clone(), principal.clone())
+            .await
+    }
+
+    /// Returns whether a principal can access `target_scope` within a tenant.
+    ///
+    /// Default implementation checks whether principal scope is equal to or an
+    /// ancestor of the target scope.
+    async fn scope_allows(
+        &self,
+        tenant: TenantId,
+        principal: PrincipalId,
+        target_scope: ScopePath,
+    ) -> std::result::Result<bool, StoreError> {
+        self.scope_allows_ref(&tenant, &principal, &target_scope)
+            .await
+    }
+
+    /// Returns whether a principal can access `target_scope` using borrowed identifiers.
+    ///
+    /// Default implementation derives principal scope by
+    /// [`principal_scope_path_ref`] and applies ancestor matching.
+    async fn scope_allows_ref(
+        &self,
+        tenant: &TenantId,
+        principal: &PrincipalId,
+        target_scope: &ScopePath,
+    ) -> std::result::Result<bool, StoreError> {
+        let scope = self.principal_scope_path_ref(tenant, principal).await?;
+        Ok(scope.is_some_and(|scope| scope.allows(target_scope)))
     }
 }
 

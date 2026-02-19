@@ -1,6 +1,6 @@
 use crate::permission::Permission;
-use crate::store::{GlobalRoleStore, RoleStore, TenantStore};
-use crate::types::{GlobalRoleId, PrincipalId, RoleId, TenantId};
+use crate::store::{GlobalRoleStore, RoleStore, ScopeStore, TenantStore};
+use crate::types::{GlobalRoleId, PrincipalId, RoleId, ScopePath, TenantId};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -15,6 +15,7 @@ pub struct MemoryStore {
 struct Inner {
     tenants: RwLock<HashMap<TenantId, bool>>,
     principals: RwLock<HashMap<TenantId, HashMap<PrincipalId, bool>>>,
+    principal_scopes: RwLock<HashMap<TenantId, HashMap<PrincipalId, ScopePath>>>,
     principal_roles: RwLock<HashMap<TenantId, HashMap<PrincipalId, HashSet<RoleId>>>>,
     role_permissions: RwLock<HashMap<TenantId, HashMap<RoleId, HashSet<Permission>>>>,
     role_inherits: RwLock<HashMap<TenantId, HashMap<RoleId, HashSet<RoleId>>>>,
@@ -53,6 +54,20 @@ impl MemoryStore {
     pub fn set_principal_active(&self, tenant: TenantId, principal: PrincipalId, active: bool) {
         let mut guard = write_guard(&self.inner.principals);
         guard.entry(tenant).or_default().insert(principal, active);
+    }
+
+    /// Sets principal scope path within a tenant.
+    pub fn set_principal_scope(
+        &self,
+        tenant: TenantId,
+        principal: PrincipalId,
+        scope_path: ScopePath,
+    ) {
+        let mut guard = write_guard(&self.inner.principal_scopes);
+        guard
+            .entry(tenant)
+            .or_default()
+            .insert(principal, scope_path);
     }
 
     /// Adds a role to a principal.
@@ -269,6 +284,29 @@ impl GlobalRoleStore for MemoryStore {
     ) -> std::result::Result<bool, crate::StoreError> {
         let guard = read_guard(&self.inner.super_admins);
         Ok(guard.contains(principal))
+    }
+}
+
+#[async_trait]
+impl ScopeStore for MemoryStore {
+    async fn principal_scope_path(
+        &self,
+        tenant: TenantId,
+        principal: PrincipalId,
+    ) -> std::result::Result<Option<ScopePath>, crate::StoreError> {
+        self.principal_scope_path_ref(&tenant, &principal).await
+    }
+
+    async fn principal_scope_path_ref(
+        &self,
+        tenant: &TenantId,
+        principal: &PrincipalId,
+    ) -> std::result::Result<Option<ScopePath>, crate::StoreError> {
+        let guard = read_guard(&self.inner.principal_scopes);
+        Ok(guard
+            .get(tenant)
+            .and_then(|scopes| scopes.get(principal))
+            .cloned())
     }
 }
 

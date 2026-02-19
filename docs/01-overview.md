@@ -4,11 +4,12 @@
 
 ## 项目定位
 
-`rs-tenant` 是一个多租户 RBAC 授权库，聚焦三件事：
+`rs-tenant` 是一个多租户 RBAC 授权库，聚焦四件事：
 
 1. 在租户上下文内做授权判定：`authorize(tenant, principal, permission)`
-2. 在资源查询前给出访问范围：`scope(tenant, principal, resource)`
-3. 通过可插拔 `Store` trait 连接你的数据库与缓存
+2. 在租户上下文内做“权限 + 目标层级作用域”联合判定：`authorize_with_scope(...)`
+3. 在资源查询前给出访问范围：`scope(tenant, principal, resource)`
+4. 通过可插拔 `Store` trait 连接你的数据库与缓存
 
 ## 适用与不适用场景
 
@@ -27,7 +28,7 @@
 只要任一关键前置条件不满足，就直接 `Deny`，避免“漏配即放行”。
 
 ### 2) 存储与引擎解耦
-引擎不关心你用 MySQL、PostgreSQL 或其他存储；你只需实现 `Store` 的异步读取能力。
+引擎不关心你用 MySQL、PostgreSQL 或其他存储；你只需实现 `Store` 的异步读取能力。若你需要层级作用域授权，再额外实现 `ScopeStore`。
 
 ### 3) 可选能力按 feature 开启
 常用 feature：
@@ -45,7 +46,7 @@
 ## 典型接入顺序
 
 1. 用 `memory-store` 跑通最小授权链路
-2. 按业务表结构实现 `TenantStore` / `RoleStore` / `GlobalRoleStore`
+2. 按业务表结构实现 `TenantStore` / `RoleStore` / `GlobalRoleStore`（层级作用域场景再实现 `ScopeStore`）
 3. 根据吞吐需求启用 `memory-cache`
 4. Web 框架（如 Axum）里统一接入授权中间件
 

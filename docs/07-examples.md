@@ -2,7 +2,7 @@
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](06-axum-integration.md) | [下一章](08-testing-benchmark.md)
 
-本章给出四个最常见的授权场景，便于你对照业务快速映射。
+本章给出五个最常见的授权场景，便于你对照业务快速映射。
 
 ## 案例 A：平台员工通过 GlobalRole 获得权限
 
@@ -130,11 +130,59 @@ async fn case_d() -> rs_tenant::Result<()> {
 }
 ```
 
+## 案例 E：层级作用域授权（`authorize_with_scope`）
+
+```rust
+use rs_tenant::{
+    Decision, EngineBuilder, MemoryStore, Permission, PrincipalId, RoleId, ScopePath, TenantId,
+};
+
+async fn case_e() -> rs_tenant::Result<()> {
+    let store = MemoryStore::new();
+    let tenant = TenantId::try_from("tenant_a")?;
+    let principal = PrincipalId::try_from("staff_scope_1")?;
+    let role = RoleId::try_from("invoice_reader")?;
+
+    store.set_tenant_active(tenant.clone(), true);
+    store.set_principal_active(tenant.clone(), principal.clone(), true);
+    store.add_principal_role(tenant.clone(), principal.clone(), role.clone());
+    store.add_role_permission(tenant.clone(), role, Permission::try_from("invoice:read")?);
+    store.set_principal_scope(
+        tenant.clone(),
+        principal.clone(),
+        ScopePath::try_from("agent/123")?,
+    );
+
+    let engine = EngineBuilder::new(store).build();
+    let allow = engine
+        .authorize_with_scope(
+            tenant.clone(),
+            principal.clone(),
+            Permission::try_from("invoice:read")?,
+            ScopePath::try_from("agent/123/store/456")?,
+        )
+        .await?;
+    let deny = engine
+        .authorize_with_scope(
+            tenant,
+            principal,
+            Permission::try_from("invoice:read")?,
+            ScopePath::try_from("agent/999/store/456")?,
+        )
+        .await?;
+
+    assert_eq!(allow, Decision::Allow);
+    assert_eq!(deny, Decision::Deny);
+    Ok(())
+}
+```
+
 ## 案例选择建议
 
 - 你是租户业务系统：先套用案例 B
 - 你有平台统一职能账号：加上案例 A
 - 你有紧急运维兜底账号：按案例 D 设计超级管理员
+- 你有层级组织隔离需求：加上案例 E 的 `authorize_with_scope`
 
 ## 继续阅读
 

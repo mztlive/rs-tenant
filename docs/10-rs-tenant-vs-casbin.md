@@ -18,7 +18,7 @@
 | 多租户语义 | 内建 `tenant` 维度与 `scope` 语义 | 可实现多租户，但需要自行建模与约束 |
 | 类型安全（Rust） | 强类型 ID（`TenantId`/`PrincipalId` 等） | 通常以字符串策略为主 |
 | 结果形态 | `Decision` + `Scope`（可直接用于数据过滤） | 以 `enforce` 判定为主 |
-| 存储接入 | 实现 `TenantStore`/`RoleStore`/`GlobalRoleStore` | 通过适配器读写策略存储 |
+| 存储接入 | 实现 `TenantStore`/`RoleStore`/`GlobalRoleStore`（层级作用域场景再实现 `ScopeStore`） | 通过适配器读写策略存储 |
 | 业务集成成本 | 对 Rust 多租户场景较低 | 初期灵活，但策略建模成本更高 |
 
 ## 语义层面的关键区别
