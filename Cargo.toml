@@ -1,6 +1,6 @@
 [package]
 name = "rs-tenant"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Multi-tenant RBAC authorization engine for Rust"
 license = "MIT OR Apache-2.0"
