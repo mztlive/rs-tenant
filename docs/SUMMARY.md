@@ -11,3 +11,4 @@
 - [08. 测试与性能基准](08-testing-benchmark.md)
 - [09. FAQ 与故障排查](09-faq-troubleshooting.md)
 - [10. rs-tenant 与 Casbin 对比](10-rs-tenant-vs-casbin.md)
+- [v0.3 重构方案](redesign-v0.3.md)

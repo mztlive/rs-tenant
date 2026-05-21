@@ -11,6 +11,7 @@
 - [Axum 与 JWT 集成](06-axum-integration.md)
 - [FAQ 与故障排查](09-faq-troubleshooting.md)
 - [rs-tenant 与 Casbin 对比](10-rs-tenant-vs-casbin.md)
+- [v0.3 重构方案](redesign-v0.3.md)
 
 ## 你将学到什么
 
@@ -36,6 +37,7 @@
 5. `05-integration-production.md`
 6. `08-testing-benchmark.md`
 7. `09-faq-troubleshooting.md`
+8. `redesign-v0.3.md`
 
 ## 版本与范围说明
 
