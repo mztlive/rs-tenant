@@ -1,6 +1,6 @@
 # rs-tenant v0.3 重构方案
 
-> 状态：草案
+> 状态：v0.3.0 实现基线
 > 目标版本：`0.3.x`
 > 范围：租户内 RBAC 核心、权限模型、范围模型、Source 边界、缓存语义、文档重写
 > 兼容策略：breaking rewrite，不提供 v0.2 兼容层
@@ -226,7 +226,11 @@ pub struct ScopePath(String);
 
 pub enum GrantScope {
     Tenant,
-    Paths(Vec<ScopePath>),
+    Paths(ScopeRoots),
+}
+
+pub struct ScopeRoots {
+    // private fields
 }
 
 pub enum AccessScope {
@@ -248,7 +252,7 @@ pub enum AccessScope {
 规则：
 
 - `GrantScope::Tenant` 明确表示全租户范围。
-- `GrantScope::Paths` 支持多个路径根。
+- `GrantScope::Paths` 支持多个路径根；公开 API 使用 `ScopeRoots` 保证非空和路径压缩不变量。
 - 空 `Paths` 无意义，应在构造时拒绝。
 - `AccessScope::Tenant` 覆盖所有路径。
 - `AccessScope::Paths` 合并时应去重，并删除已经被祖先路径覆盖的子路径。
@@ -289,10 +293,10 @@ RoleAssignment {
 
 RoleAssignment {
     role: RoleId::parse("store_order_reader")?,
-    scope: GrantScope::Paths(vec![
+    scope: GrantScope::paths(vec![
         ScopePath::parse("agent/123/store/456")?,
         ScopePath::parse("agent/123/store/789")?,
-    ]),
+    ])?,
 }
 ```
 
@@ -473,7 +477,7 @@ pub struct AccessExplanation {
 - Source 错误通过 `Err` 返回，不放进 reason。
 - 不暴露敏感内部错误。
 
-不在 v0.3 core 公开 matched grant 明细。需要审计明细的应用可以在未来 feature 中扩展。
+不在 v0.3 core 公开 matched grant / effective access 解释明细。`EffectiveGrant` 仅服务公开 `Cache` trait 的扩展点，不应作为业务审计模型使用。需要审计明细的应用可以在未来 feature 中扩展。
 
 ## 6. Source 边界
 
@@ -688,12 +692,13 @@ v0.3 core 不设计平台授权模型。
 
 ### 11.1 缓存内容
 
-v0.3 不缓存裸 `Vec<Permission>`，而是缓存内部 effective grants。
+v0.3 不缓存裸 `Vec<Permission>`，而是缓存 effective grants。
 
-建议内部模型：
+由于 `Cache` trait 是公开扩展点，缓存值类型需要能被自定义 cache 实现命名；它仍然不作为业务授权解释模型使用，文档中隐藏其业务语义。
 
 ```rust
-pub(crate) struct EffectiveGrant {
+#[doc(hidden)]
+pub struct EffectiveGrant {
     pub role: RoleId,
     pub permission: Permission,
     pub scope: GrantScope,

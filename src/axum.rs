@@ -93,14 +93,18 @@ where
         let permission = self.permission.clone();
 
         Box::pin(async move {
-            let context = req.extensions().get::<AuthContext>().cloned();
-            let Some(context) = context else {
+            let subject = req
+                .extensions()
+                .get::<AuthContext>()
+                .map(|context| context.subject.clone())
+                .or_else(|| req.extensions().get::<AuthSubject>().cloned());
+            let Some(subject) = subject else {
                 return Ok((StatusCode::UNAUTHORIZED, "missing auth context").into_response());
             };
 
             match engine
                 .can_tenant(TenantAccessRequest {
-                    subject: context.subject,
+                    subject,
                     permission,
                 })
                 .await
@@ -310,6 +314,7 @@ pub mod jwt {
                 return Ok(existing.clone());
             }
             let auth = state.jwt_auth().decode_from_headers(&parts.headers)?;
+            parts.extensions.insert(auth.context.subject.clone());
             parts.extensions.insert(auth.clone());
             parts.extensions.insert(auth.context.clone());
             Ok(auth)
@@ -386,6 +391,7 @@ pub mod jwt {
             Box::pin(async move {
                 match state.decode_from_headers(req.headers()) {
                     Ok(auth) => {
+                        req.extensions_mut().insert(auth.context.subject.clone());
                         req.extensions_mut().insert(auth.context.clone());
                         req.extensions_mut().insert(auth);
                         poll_fn(|cx| inner.poll_ready(cx)).await?;

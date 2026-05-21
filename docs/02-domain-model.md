@@ -72,7 +72,11 @@ pub struct ScopePath(String);
 
 pub enum GrantScope {
     Tenant,
-    Paths(Vec<ScopePath>),
+    Paths(ScopeRoots),
+}
+
+pub struct ScopeRoots {
+    // private fields
 }
 
 pub enum AccessScope {
@@ -94,7 +98,7 @@ pub enum AccessScope {
 范围规则：
 
 - `GrantScope::Tenant` 明确表示全租户范围。
-- `GrantScope::Paths` 支持多个路径根，但空 paths 无意义，构造时应拒绝。
+- `GrantScope::Paths` 支持多个路径根；公开 API 使用 `ScopeRoots` 保证空 paths 被拒绝，并在构造时完成去重和祖先覆盖压缩。
 - `AccessScope::Tenant` 覆盖所有路径。
 - 多个 `AccessScope::Paths` 合并时会去重，并删除已被祖先路径覆盖的子路径。
 - 没有匹配授权时返回 `AccessScope::None`。

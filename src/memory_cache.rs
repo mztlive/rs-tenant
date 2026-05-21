@@ -291,3 +291,138 @@ impl Cache for MemoryCache {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryCache;
+    use crate::cache::{Cache, EffectiveGrant};
+    use crate::{GrantScope, Permission, PrincipalId, RoleId, TenantId};
+    use futures::executor::block_on;
+    use std::time::Duration;
+
+    fn ids(suffix: &str) -> (TenantId, PrincipalId, RoleId) {
+        (
+            TenantId::parse(format!("tenant_{suffix}")).expect("tenant"),
+            PrincipalId::parse(format!("principal_{suffix}")).expect("principal"),
+            RoleId::parse(format!("role_{suffix}")).expect("role"),
+        )
+    }
+
+    fn grant(role: RoleId, permission: &str) -> EffectiveGrant {
+        EffectiveGrant::new(
+            role,
+            Permission::parse(permission).expect("permission"),
+            GrantScope::tenant(),
+        )
+    }
+
+    #[test]
+    fn memory_cache_should_return_hot_entry() {
+        let (tenant, principal, role) = ids("hot");
+        let cache = MemoryCache::new(8);
+        let grants = vec![grant(role, "invoice:read")];
+
+        block_on(cache.set_effective_grants(&tenant, &principal, "a", grants.clone()));
+        let cached = block_on(cache.get_effective_grants(&tenant, &principal, "a"));
+
+        assert_eq!(cached, Some(grants));
+    }
+
+    #[test]
+    fn memory_cache_should_isolate_config_signatures() {
+        let (tenant, principal, role) = ids("signature");
+        let cache = MemoryCache::new(8);
+        block_on(cache.set_effective_grants(
+            &tenant,
+            &principal,
+            "wildcard-off",
+            vec![grant(role, "invoice:*")],
+        ));
+
+        let cached = block_on(cache.get_effective_grants(&tenant, &principal, "wildcard-on"));
+
+        assert!(cached.is_none());
+    }
+
+    #[test]
+    fn memory_cache_should_invalidate_principal() {
+        let (tenant, principal, role) = ids("invalidate_principal");
+        let other_principal = PrincipalId::parse("principal_other").expect("principal");
+        let cache = MemoryCache::new(8);
+        block_on(cache.set_effective_grants(
+            &tenant,
+            &principal,
+            "a",
+            vec![grant(role.clone(), "invoice:read")],
+        ));
+        block_on(cache.set_effective_grants(
+            &tenant,
+            &other_principal,
+            "a",
+            vec![grant(role, "invoice:read")],
+        ));
+
+        block_on(cache.invalidate_principal(&tenant, &principal));
+
+        assert!(block_on(cache.get_effective_grants(&tenant, &principal, "a")).is_none());
+        assert!(block_on(cache.get_effective_grants(&tenant, &other_principal, "a")).is_some());
+    }
+
+    #[test]
+    fn memory_cache_invalidate_role_should_fallback_to_tenant() {
+        let (tenant, principal, role) = ids("invalidate_role");
+        let other_principal = PrincipalId::parse("principal_other").expect("principal");
+        let cache = MemoryCache::new(8);
+        block_on(cache.set_effective_grants(
+            &tenant,
+            &principal,
+            "a",
+            vec![grant(role.clone(), "invoice:read")],
+        ));
+        block_on(cache.set_effective_grants(
+            &tenant,
+            &other_principal,
+            "a",
+            vec![grant(role.clone(), "order:read")],
+        ));
+
+        block_on(cache.invalidate_role(&tenant, &role));
+
+        assert!(block_on(cache.get_effective_grants(&tenant, &principal, "a")).is_none());
+        assert!(block_on(cache.get_effective_grants(&tenant, &other_principal, "a")).is_none());
+    }
+
+    #[test]
+    fn memory_cache_should_expire_by_ttl() {
+        let (tenant, principal, role) = ids("ttl");
+        let cache = MemoryCache::new(8).with_ttl(Duration::from_nanos(1));
+        block_on(cache.set_effective_grants(
+            &tenant,
+            &principal,
+            "a",
+            vec![grant(role, "invoice:read")],
+        ));
+
+        std::thread::sleep(Duration::from_millis(1));
+
+        assert!(block_on(cache.get_effective_grants(&tenant, &principal, "a")).is_none());
+    }
+
+    #[test]
+    fn memory_cache_should_evict_lru_entry() {
+        let tenant = TenantId::parse("tenant_lru").expect("tenant");
+        let role = RoleId::parse("role_lru").expect("role");
+        let a = PrincipalId::parse("principal_a").expect("principal");
+        let b = PrincipalId::parse("principal_b").expect("principal");
+        let c = PrincipalId::parse("principal_c").expect("principal");
+        let cache = MemoryCache::new(2);
+        block_on(cache.set_effective_grants(&tenant, &a, "a", vec![grant(role.clone(), "a:read")]));
+        block_on(cache.set_effective_grants(&tenant, &b, "a", vec![grant(role.clone(), "b:read")]));
+        assert!(block_on(cache.get_effective_grants(&tenant, &a, "a")).is_some());
+        block_on(cache.set_effective_grants(&tenant, &c, "a", vec![grant(role, "c:read")]));
+
+        assert!(block_on(cache.get_effective_grants(&tenant, &a, "a")).is_some());
+        assert!(block_on(cache.get_effective_grants(&tenant, &b, "a")).is_none());
+        assert!(block_on(cache.get_effective_grants(&tenant, &c, "a")).is_some());
+    }
+}

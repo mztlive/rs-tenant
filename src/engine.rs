@@ -486,4 +486,222 @@ mod tests {
         assert_eq!(explanation.scope, AccessScope::None);
         assert_eq!(explanation.reason, Some(DenyReason::TenantInactive));
     }
+
+    #[test]
+    fn inactive_membership_should_return_none_with_reason() {
+        let (tenant, principal, role) = ids();
+        let source = MemorySource::new();
+        source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+        source.set_membership_status(
+            tenant.clone(),
+            principal.clone(),
+            MembershipStatus::Inactive,
+        );
+        source.add_role_assignment(
+            tenant.clone(),
+            principal.clone(),
+            role.clone(),
+            GrantScope::tenant(),
+        );
+        source.add_role_permission(
+            tenant.clone(),
+            role,
+            Permission::parse("invoice:read").expect("permission"),
+        );
+        let engine = EngineBuilder::new(source).build();
+
+        let explanation = block_on(engine.explain_tenant(TenantAccessRequest {
+            subject: AuthSubject::new(tenant, principal),
+            permission: Permission::parse("invoice:read").expect("permission"),
+        }))
+        .expect("explanation");
+
+        assert_eq!(explanation.scope, AccessScope::None);
+        assert_eq!(explanation.reason, Some(DenyReason::PrincipalInactive));
+    }
+
+    #[test]
+    fn no_role_assignment_should_return_none() {
+        let (tenant, principal, _) = ids();
+        let source = MemorySource::new();
+        source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+        source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
+        let engine = EngineBuilder::new(source).build();
+
+        let explanation = block_on(engine.explain_tenant(TenantAccessRequest {
+            subject: AuthSubject::new(tenant, principal),
+            permission: Permission::parse("invoice:read").expect("permission"),
+        }))
+        .expect("explanation");
+
+        assert_eq!(explanation.scope, AccessScope::None);
+        assert_eq!(explanation.reason, Some(DenyReason::PermissionMissing));
+    }
+
+    #[test]
+    fn permission_missing_should_deny() {
+        let (source, subject) = active_source(GrantScope::tenant(), "invoice:read");
+        let engine = EngineBuilder::new(source).build();
+
+        let explanation = block_on(engine.explain_tenant(TenantAccessRequest {
+            subject,
+            permission: Permission::parse("invoice:update").expect("permission"),
+        }))
+        .expect("explanation");
+
+        assert_eq!(explanation.decision, AccessDecision::Deny);
+        assert_eq!(explanation.reason, Some(DenyReason::PermissionMissing));
+    }
+
+    #[test]
+    fn can_access_scope_should_deny_outside_roots() {
+        let root = ScopePath::parse("agent/1").expect("scope path");
+        let target = ScopePath::parse("agent/2/store/9").expect("scope path");
+        let (source, subject) = active_source(
+            GrantScope::paths(vec![root]).expect("grant scope"),
+            "invoice:read",
+        );
+        let engine = EngineBuilder::new(source).build();
+
+        let explanation = block_on(engine.explain_access_scope(ScopedAccessRequest {
+            subject,
+            permission: Permission::parse("invoice:read").expect("permission"),
+            target,
+        }))
+        .expect("explanation");
+
+        assert_eq!(explanation.decision, AccessDecision::Deny);
+        assert_eq!(explanation.reason, Some(DenyReason::ScopeDenied));
+    }
+
+    #[test]
+    fn can_tenant_should_allow_tenant_grant() {
+        let (source, subject) = active_source(GrantScope::tenant(), "invoice:read");
+        let engine = EngineBuilder::new(source).build();
+
+        let decision = block_on(engine.can_tenant(TenantAccessRequest {
+            subject,
+            permission: Permission::parse("invoice:read").expect("permission"),
+        }))
+        .expect("decision");
+
+        assert_eq!(decision, AccessDecision::Allow);
+    }
+
+    #[test]
+    fn multiple_path_assignments_should_merge_roots() {
+        let (tenant, principal, first_role) = ids();
+        let second_role = RoleId::parse("reader_2").expect("role");
+        let source = MemorySource::new();
+        source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+        source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
+        source.add_role_assignment(
+            tenant.clone(),
+            principal.clone(),
+            first_role.clone(),
+            GrantScope::paths(vec![
+                ScopePath::parse("agent/1/store/1").expect("scope path"),
+                ScopePath::parse("agent/2").expect("scope path"),
+            ])
+            .expect("grant scope"),
+        );
+        source.add_role_assignment(
+            tenant.clone(),
+            principal.clone(),
+            second_role.clone(),
+            GrantScope::paths(vec![ScopePath::parse("agent/1").expect("scope path")])
+                .expect("grant scope"),
+        );
+        let permission = Permission::parse("invoice:read").expect("permission");
+        source.add_role_permission(tenant.clone(), first_role, permission.clone());
+        source.add_role_permission(tenant.clone(), second_role, permission.clone());
+        let engine = EngineBuilder::new(source).build();
+
+        let scope = block_on(engine.accessible_scope(ScopeQuery {
+            subject: AuthSubject::new(tenant.clone(), principal),
+            permission,
+        }))
+        .expect("scope");
+
+        assert_eq!(
+            scope,
+            AccessScope::Paths {
+                tenant,
+                roots: vec![
+                    ScopePath::parse("agent/1").expect("scope path"),
+                    ScopePath::parse("agent/2").expect("scope path"),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn role_cycle_should_return_error() {
+        let (tenant, principal, child) = ids();
+        let parent = RoleId::parse("parent").expect("role");
+        let source = MemorySource::new();
+        source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+        source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
+        source.add_role_assignment(
+            tenant.clone(),
+            principal.clone(),
+            child.clone(),
+            GrantScope::tenant(),
+        );
+        source.add_parent_role(tenant.clone(), child.clone(), parent.clone());
+        source.add_parent_role(tenant.clone(), parent, child.clone());
+        let engine = EngineBuilder::new(source)
+            .enable_role_hierarchy(true)
+            .build();
+
+        let err = block_on(engine.accessible_scope(ScopeQuery {
+            subject: AuthSubject::new(tenant.clone(), principal),
+            permission: Permission::parse("invoice:read").expect("permission"),
+        }))
+        .expect_err("must detect cycle");
+
+        assert!(matches!(
+            err,
+            Error::RoleCycleDetected { tenant: ref err_tenant, role }
+                if err_tenant == &tenant && role == child
+        ));
+    }
+
+    #[test]
+    fn role_depth_exceeded_should_return_error() {
+        let (tenant, principal, child) = ids();
+        let parent = RoleId::parse("parent").expect("role");
+        let grandparent = RoleId::parse("grandparent").expect("role");
+        let source = MemorySource::new();
+        source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+        source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
+        source.add_role_assignment(
+            tenant.clone(),
+            principal.clone(),
+            child,
+            GrantScope::tenant(),
+        );
+        source.add_parent_role(
+            tenant.clone(),
+            RoleId::parse("reader").expect("role"),
+            parent.clone(),
+        );
+        source.add_parent_role(tenant.clone(), parent, grandparent.clone());
+        let engine = EngineBuilder::new(source)
+            .enable_role_hierarchy(true)
+            .max_role_depth(1)
+            .build();
+
+        let err = block_on(engine.accessible_scope(ScopeQuery {
+            subject: AuthSubject::new(tenant.clone(), principal),
+            permission: Permission::parse("invoice:read").expect("permission"),
+        }))
+        .expect_err("must enforce max depth");
+
+        assert!(matches!(
+            err,
+            Error::RoleDepthExceeded { tenant: ref err_tenant, role, max_depth: 1 }
+                if err_tenant == &tenant && role == grandparent
+        ));
+    }
 }

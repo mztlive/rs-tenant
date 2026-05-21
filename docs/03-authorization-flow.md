@@ -115,7 +115,7 @@ pub struct AccessExplanation {
 
 ## 缓存参与点
 
-`MemoryCache` 或自定义缓存应缓存内部 effective grants，而不是裸 `Vec<Permission>`。缓存 key 需要包含：
+`MemoryCache` 或自定义缓存应缓存 effective grants，而不是裸 `Vec<Permission>`。`EffectiveGrant` 只服务 `Cache` 扩展点，不作为业务解释模型。缓存 key 需要包含：
 
 - tenant
 - principal

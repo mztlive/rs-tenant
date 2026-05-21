@@ -28,7 +28,7 @@ async fn seed() -> rs_tenant::Result<(MemorySource, AuthSubject)> {
     let principal = PrincipalId::parse("user_1")?;
     let subject = AuthSubject {
         tenant: tenant.clone(),
-        principal,
+        principal: principal.clone(),
     };
     let role = RoleId::parse("store_order_reader")?;
 
@@ -130,6 +130,8 @@ async fn can_manage_tenant_settings() -> rs_tenant::Result<()> {
 ## Step 6: 常用 Engine 配置
 
 ```rust
+use rs_tenant::{EngineBuilder, MemoryCache};
+
 let engine = EngineBuilder::new(source)
     .enable_role_hierarchy(true)
     .enable_wildcard(true)

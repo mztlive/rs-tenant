@@ -13,6 +13,8 @@ Web 层可以负责：
 - 构造 `AuthSubject`。
 - 在路由上调用租户级授权或范围级 helper。
 
+内置 `TenantAuthorizeLayer` 会优先读取 request extension 里的 `AuthContext`，也接受直接注入的 `AuthSubject`。`axum-jwt` 中间件会同时写入这两个 extension，方便业务 handler 用 `Extension<AuthSubject>`。
+
 Web 层不应该自动推断：
 
 - 平台身份如何映射为租户内主体。
