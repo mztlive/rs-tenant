@@ -15,6 +15,7 @@
 - [09. FAQ 与故障排查](09-faq-troubleshooting.md)
 - [10. Casbin 边界](10-rs-tenant-vs-casbin.md)
 - [v0.3 重构方案](redesign-v0.3.md)
+- [v0.4 平台授权设计方案](redesign-v0.4.md)
 
 ## 你将学到什么
 
@@ -42,5 +43,6 @@
 3. [05. 生产环境集成指南](05-integration-production.md)
 4. [08. 测试与性能基准](08-testing-benchmark.md)
 5. [10. Casbin 边界](10-rs-tenant-vs-casbin.md)
+6. [v0.4 平台授权设计方案](redesign-v0.4.md)
 
 完整目录见 [SUMMARY.md](SUMMARY.md)。

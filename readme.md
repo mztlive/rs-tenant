@@ -131,6 +131,7 @@ v0.3.0 是 breaking rewrite，不保留旧概念别名或兼容 feature：
 - [09. FAQ 与故障排查](docs/09-faq-troubleshooting.md)
 - [10. Casbin 边界](docs/10-rs-tenant-vs-casbin.md)
 - [v0.3 重构方案](docs/redesign-v0.3.md)
+- [v0.4 平台授权设计方案](docs/redesign-v0.4.md)
 
 本地预览 mdBook：
 
