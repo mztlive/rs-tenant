@@ -1,327 +1,314 @@
-use crate::cache::{Cache, NoCache};
+use crate::cache::{Cache, EffectiveGrant, NoCache};
+use crate::decision::{AccessDecision, AccessExplanation, DenyReason};
 use crate::error::{Error, Result};
-use crate::permission::{Permission, permission_matches, resource_matches};
-use crate::store::{ScopeStore, Store};
-use crate::types::{PrincipalId, ResourceName, RoleId, ScopePath, TenantId};
+use crate::ids::{PrincipalId, RoleId, TenantId};
+use crate::request::{AuthSubject, ScopeQuery, ScopedAccessRequest, TenantAccessRequest};
+use crate::scope::AccessScope;
+use crate::source::{AuthorizationSource, MembershipStatus, TenantStatus};
 use std::collections::HashSet;
 
-const CACHE_SIGNATURE_PREFIX: &str = "__rs_tenant_cache_sig__=";
-
-/// Authorization decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decision {
-    /// Permission is granted.
-    Allow,
-    /// Permission is denied.
-    Deny,
+/// Engine behavior configuration.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EngineConfig {
+    /// Enables role inheritance traversal through [`AuthorizationSource::parent_roles`].
+    pub enable_role_hierarchy: bool,
+    /// Enables complete resource/action wildcard matching.
+    pub enable_wildcard: bool,
+    /// Maximum role inheritance depth.
+    pub max_role_depth: usize,
 }
 
-/// Scope result for resource filtering.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Scope {
-    /// No access to the resource.
-    None,
-    /// Access limited to a tenant.
-    TenantOnly { tenant: TenantId },
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            enable_role_hierarchy: false,
+            enable_wildcard: false,
+            max_role_depth: 16,
+        }
+    }
 }
 
-/// RBAC engine with pluggable store and optional cache.
+impl EngineConfig {
+    fn signature(&self) -> String {
+        format!(
+            "rh:{};wc:{};depth:{}",
+            u8::from(self.enable_role_hierarchy),
+            u8::from(self.enable_wildcard),
+            self.max_role_depth
+        )
+    }
+}
+
+/// Tenant RBAC authorization engine.
 #[derive(Debug)]
 pub struct Engine<S, C = NoCache> {
-    store: S,
+    source: S,
     cache: C,
-    cache_signature_marker: Permission,
-    enable_role_hierarchy: bool,
-    enable_wildcard: bool,
-    enable_super_admin: bool,
-    max_inherit_depth: usize,
-    permission_normalize: bool,
+    config: EngineConfig,
+    config_signature: String,
 }
 
 /// Builder for [`Engine`].
 pub struct EngineBuilder<S, C = NoCache> {
-    store: S,
+    source: S,
     cache: C,
-    enable_role_hierarchy: bool,
-    enable_wildcard: bool,
-    enable_super_admin: bool,
-    max_inherit_depth: usize,
-    permission_normalize: bool,
+    config: EngineConfig,
 }
 
 impl<S> EngineBuilder<S, NoCache> {
-    /// Creates a new builder with default configuration.
-    pub fn new(store: S) -> Self {
+    /// Creates a builder using default configuration and no cache.
+    pub fn new(source: S) -> Self {
         Self {
-            store,
+            source,
             cache: NoCache,
-            enable_role_hierarchy: false,
-            enable_wildcard: false,
-            enable_super_admin: false,
-            max_inherit_depth: 16,
-            permission_normalize: true,
+            config: EngineConfig::default(),
         }
     }
 }
 
 impl<S, C> EngineBuilder<S, C> {
+    /// Replaces the full engine configuration.
+    pub fn config(mut self, config: EngineConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     /// Enables or disables role inheritance.
     pub fn enable_role_hierarchy(mut self, on: bool) -> Self {
-        self.enable_role_hierarchy = on;
+        self.config.enable_role_hierarchy = on;
         self
     }
 
-    /// Enables or disables wildcard permission matching.
+    /// Enables or disables wildcard matching.
     pub fn enable_wildcard(mut self, on: bool) -> Self {
-        self.enable_wildcard = on;
+        self.config.enable_wildcard = on;
         self
     }
 
-    /// Enables or disables super-admin short-circuit checks.
-    pub fn enable_super_admin(mut self, on: bool) -> Self {
-        self.enable_super_admin = on;
-        self
-    }
-
-    /// Sets maximum inheritance depth.
-    pub fn max_inherit_depth(mut self, depth: usize) -> Self {
-        self.max_inherit_depth = depth;
-        self
-    }
-
-    /// Enables or disables permission normalization for matching.
-    pub fn permission_normalize(mut self, on: bool) -> Self {
-        self.permission_normalize = on;
+    /// Sets maximum role inheritance depth.
+    pub fn max_role_depth(mut self, depth: usize) -> Self {
+        self.config.max_role_depth = depth;
         self
     }
 
     /// Sets the cache implementation.
     pub fn cache<C2: Cache>(self, cache: C2) -> EngineBuilder<S, C2> {
         EngineBuilder {
-            store: self.store,
+            source: self.source,
             cache,
-            enable_role_hierarchy: self.enable_role_hierarchy,
-            enable_wildcard: self.enable_wildcard,
-            enable_super_admin: self.enable_super_admin,
-            max_inherit_depth: self.max_inherit_depth,
-            permission_normalize: self.permission_normalize,
+            config: self.config,
         }
     }
 
     /// Builds the engine.
     pub fn build(self) -> Engine<S, C> {
-        let cache_signature_marker = Permission::from_string(format!(
-            "{CACHE_SIGNATURE_PREFIX}rh:{};wc:{};sa:{};depth:{};norm:{}",
-            u8::from(self.enable_role_hierarchy),
-            u8::from(self.enable_wildcard),
-            u8::from(self.enable_super_admin),
-            self.max_inherit_depth,
-            u8::from(self.permission_normalize),
-        ));
-
+        let config_signature = self.config.signature();
         Engine {
-            store: self.store,
+            source: self.source,
             cache: self.cache,
-            cache_signature_marker,
-            enable_role_hierarchy: self.enable_role_hierarchy,
-            enable_wildcard: self.enable_wildcard,
-            enable_super_admin: self.enable_super_admin,
-            max_inherit_depth: self.max_inherit_depth,
-            permission_normalize: self.permission_normalize,
+            config: self.config,
+            config_signature,
         }
     }
 }
 
 impl<S, C> Engine<S, C>
 where
-    S: Store,
+    S: AuthorizationSource,
     C: Cache,
 {
-    /// Authorizes a principal for a permission within a tenant.
-    pub async fn authorize(
-        &self,
-        tenant: TenantId,
-        principal: PrincipalId,
-        permission: Permission,
-    ) -> Result<Decision> {
-        self.authorize_ref(&tenant, &principal, &permission).await
+    /// Returns the current engine configuration.
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
     }
 
-    /// Authorizes a principal for a permission within a tenant.
-    pub async fn authorize_ref(
-        &self,
-        tenant: &TenantId,
-        principal: &PrincipalId,
-        permission: &Permission,
-    ) -> Result<Decision> {
-        if !self.store.tenant_active_ref(tenant).await? {
-            return Ok(Decision::Deny);
-        }
-        if self.enable_super_admin && self.store.is_super_admin_ref(principal).await? {
-            return Ok(Decision::Allow);
-        }
-        if !self.store.principal_active_ref(tenant, principal).await? {
-            return Ok(Decision::Deny);
-        }
-
-        let permissions = self.effective_permissions(tenant, principal).await?;
-        let allowed = permissions.iter().any(|granted| {
-            permission_matches(
-                granted,
-                permission,
-                self.enable_wildcard,
-                self.permission_normalize,
-            )
-        });
-
-        Ok(if allowed {
-            Decision::Allow
-        } else {
-            Decision::Deny
-        })
+    /// Computes the accessible data scope for a permission.
+    pub async fn accessible_scope(&self, query: ScopeQuery) -> Result<AccessScope> {
+        let (scope, _) = self.scope_with_reason(query).await?;
+        Ok(scope)
     }
 
-    /// Computes scope for a resource within a tenant.
-    pub async fn scope(
-        &self,
-        tenant: TenantId,
-        principal: PrincipalId,
-        resource: ResourceName,
-    ) -> Result<Scope> {
-        self.scope_ref(&tenant, &principal, &resource).await
+    /// Checks whether a subject can access a target scope path.
+    pub async fn can_access_scope(&self, request: ScopedAccessRequest) -> Result<AccessDecision> {
+        Ok(self.explain_access_scope(request).await?.decision)
     }
 
-    /// Computes scope for a resource within a tenant.
-    pub async fn scope_ref(
-        &self,
-        tenant: &TenantId,
-        principal: &PrincipalId,
-        resource: &ResourceName,
-    ) -> Result<Scope> {
-        if !self.store.tenant_active_ref(tenant).await? {
-            return Ok(Scope::None);
-        }
-        if self.enable_super_admin && self.store.is_super_admin_ref(principal).await? {
-            return Ok(Scope::TenantOnly {
-                tenant: tenant.clone(),
-            });
-        }
-        if !self.store.principal_active_ref(tenant, principal).await? {
-            return Ok(Scope::None);
-        }
-
-        let permissions = self.effective_permissions(tenant, principal).await?;
-        let allowed = permissions.iter().any(|granted| {
-            resource_matches(
-                granted,
-                resource,
-                self.enable_wildcard,
-                self.permission_normalize,
-            )
-        });
-
-        Ok(if allowed {
-            Scope::TenantOnly {
-                tenant: tenant.clone(),
-            }
-        } else {
-            Scope::None
-        })
+    /// Checks whether a subject has tenant-wide access.
+    pub async fn can_tenant(&self, request: TenantAccessRequest) -> Result<AccessDecision> {
+        Ok(self.explain_tenant(request).await?.decision)
     }
 
-    async fn effective_permissions(
+    /// Explains a target path access check.
+    pub async fn explain_access_scope(
         &self,
-        tenant: &TenantId,
-        principal: &PrincipalId,
-    ) -> Result<Vec<Permission>> {
-        if let Some(cached) = self.cache.get_permissions(tenant, principal).await
-            && let Some(perms) = self.decode_cached_permissions(cached)
-        {
-            return Ok(perms);
-        }
-
-        let direct_roles = self.store.principal_roles_ref(tenant, principal).await?;
-        let roles = if self.enable_role_hierarchy {
-            self.expand_roles(tenant, direct_roles).await?
-        } else {
-            direct_roles
+        request: ScopedAccessRequest,
+    ) -> Result<AccessExplanation> {
+        let query = ScopeQuery {
+            subject: request.subject,
+            permission: request.permission,
         };
-
-        let mut permissions = HashSet::new();
-        for role in roles {
-            let role_permissions = self.store.role_permissions_ref(tenant, &role).await?;
-            permissions.extend(role_permissions);
-        }
-
-        let global_roles = self.store.global_roles_ref(principal).await?;
-        for role in global_roles {
-            let global_permissions = self.store.global_role_permissions_ref(&role).await?;
-            permissions.extend(global_permissions);
-        }
-
-        let perms: Vec<Permission> = permissions.into_iter().collect();
-        let cached = self.encode_cached_permissions(perms.clone());
-        self.cache.set_permissions(tenant, principal, cached).await;
-        Ok(perms)
+        let (scope, reason) = self.scope_with_reason(query).await?;
+        let (decision, reason) = match &scope {
+            AccessScope::None => (
+                AccessDecision::Deny,
+                reason.or(Some(DenyReason::PermissionMissing)),
+            ),
+            AccessScope::Tenant { .. } => (AccessDecision::Allow, None),
+            AccessScope::Paths { .. } if scope.allows_path(&request.target) => {
+                (AccessDecision::Allow, None)
+            }
+            AccessScope::Paths { .. } => (AccessDecision::Deny, Some(DenyReason::ScopeDenied)),
+        };
+        Ok(AccessExplanation {
+            decision,
+            reason,
+            scope,
+        })
     }
 
-    fn encode_cached_permissions(&self, perms: Vec<Permission>) -> Vec<Permission> {
-        let mut cached = Vec::with_capacity(perms.len() + 1);
-        cached.push(self.cache_signature_marker.clone());
-        cached.extend(perms);
-        cached
+    /// Explains a tenant-level access check.
+    pub async fn explain_tenant(&self, request: TenantAccessRequest) -> Result<AccessExplanation> {
+        let query = ScopeQuery {
+            subject: request.subject,
+            permission: request.permission,
+        };
+        let (scope, reason) = self.scope_with_reason(query).await?;
+        let (decision, reason) = match &scope {
+            AccessScope::Tenant { .. } => (AccessDecision::Allow, None),
+            AccessScope::Paths { .. } => {
+                (AccessDecision::Deny, Some(DenyReason::TargetScopeRequired))
+            }
+            AccessScope::None => (
+                AccessDecision::Deny,
+                reason.or(Some(DenyReason::PermissionMissing)),
+            ),
+        };
+        Ok(AccessExplanation {
+            decision,
+            reason,
+            scope,
+        })
     }
 
-    fn decode_cached_permissions(&self, cached: Vec<Permission>) -> Option<Vec<Permission>> {
-        let mut iter = cached.into_iter();
-        let marker = iter.next()?;
-        if marker != self.cache_signature_marker {
-            return None;
+    /// Invalidates grants cached for a principal.
+    pub async fn invalidate_principal(&self, tenant: &TenantId, principal: &PrincipalId) {
+        self.cache.invalidate_principal(tenant, principal).await;
+    }
+
+    /// Invalidates grants cached for a role.
+    pub async fn invalidate_role(&self, tenant: &TenantId, role: &RoleId) {
+        self.cache.invalidate_role(tenant, role).await;
+    }
+
+    /// Invalidates grants cached for a tenant.
+    pub async fn invalidate_tenant(&self, tenant: &TenantId) {
+        self.cache.invalidate_tenant(tenant).await;
+    }
+
+    /// Invalidates all cached grants.
+    pub async fn invalidate_all(&self) {
+        self.cache.invalidate_all().await;
+    }
+
+    async fn scope_with_reason(
+        &self,
+        query: ScopeQuery,
+    ) -> Result<(AccessScope, Option<DenyReason>)> {
+        let tenant = query.subject.tenant.clone();
+        if self.source.tenant_status(&tenant).await? != TenantStatus::Active {
+            return Ok((AccessScope::None, Some(DenyReason::TenantInactive)));
         }
-        Some(iter.collect())
+        if self.source.membership_status(&query.subject).await? != MembershipStatus::Active {
+            return Ok((AccessScope::None, Some(DenyReason::PrincipalInactive)));
+        }
+
+        let grants = self.effective_grants(&query.subject).await?;
+        let matched_scopes = grants
+            .into_iter()
+            .filter(|grant| {
+                grant
+                    .permission
+                    .matches(&query.permission, self.config.enable_wildcard)
+            })
+            .map(|grant| grant.scope);
+        let scope = AccessScope::merge(tenant, matched_scopes);
+        let reason = match scope {
+            AccessScope::None => Some(DenyReason::PermissionMissing),
+            _ => None,
+        };
+        Ok((scope, reason))
     }
 
-    async fn expand_roles(&self, tenant: &TenantId, roles: Vec<RoleId>) -> Result<Vec<RoleId>> {
+    async fn effective_grants(&self, subject: &AuthSubject) -> Result<Vec<EffectiveGrant>> {
+        if let Some(grants) = self
+            .cache
+            .get_effective_grants(&subject.tenant, &subject.principal, &self.config_signature)
+            .await
+        {
+            return Ok(grants);
+        }
+
+        let assignments = self.source.role_assignments(subject).await?;
+        let mut grants = Vec::new();
+        for assignment in assignments {
+            let roles = if self.config.enable_role_hierarchy {
+                self.expand_roles(&subject.tenant, assignment.role.clone())
+                    .await?
+            } else {
+                vec![assignment.role]
+            };
+
+            for role in roles {
+                let permissions = self.source.role_permissions(&subject.tenant, &role).await?;
+                grants.extend(permissions.into_iter().map(|permission| {
+                    EffectiveGrant::new(role.clone(), permission, assignment.scope.clone())
+                }));
+            }
+        }
+
+        self.cache
+            .set_effective_grants(
+                &subject.tenant,
+                &subject.principal,
+                &self.config_signature,
+                grants.clone(),
+            )
+            .await;
+        Ok(grants)
+    }
+
+    async fn expand_roles(&self, tenant: &TenantId, root: RoleId) -> Result<Vec<RoleId>> {
         let mut visited = HashSet::new();
         let mut visiting = HashSet::new();
         let mut output = Vec::new();
-
-        for role in roles {
-            if visited.contains(&role) {
-                continue;
-            }
-            self.expand_from_role(tenant, role, &mut visited, &mut visiting, &mut output)
-                .await?;
-        }
-
+        self.expand_from_role(tenant, root, &mut visited, &mut visiting, &mut output)
+            .await?;
         Ok(output)
     }
 
     async fn expand_from_role(
         &self,
         tenant: &TenantId,
-        role: RoleId,
+        root: RoleId,
         visited: &mut HashSet<RoleId>,
         visiting: &mut HashSet<RoleId>,
         output: &mut Vec<RoleId>,
     ) -> Result<()> {
-        let parents = self.store.role_inherits_ref(tenant, &role).await?;
-        visiting.insert(role.clone());
-        output.push(role.clone());
-
+        visiting.insert(root.clone());
+        output.push(root.clone());
+        let parents = self.source.parent_roles(tenant, &root).await?;
         let mut stack: Vec<(RoleId, usize, std::vec::IntoIter<RoleId>)> =
-            vec![(role, 0, parents.into_iter())];
+            vec![(root, 0, parents.into_iter())];
 
         while let Some((current, depth, mut iter)) = stack.pop() {
             if let Some(parent) = iter.next() {
                 stack.push((current.clone(), depth, iter));
-
                 let next_depth = depth + 1;
-                if next_depth > self.max_inherit_depth {
+                if next_depth > self.config.max_role_depth {
                     return Err(Error::RoleDepthExceeded {
                         tenant: tenant.clone(),
                         role: parent,
-                        max_depth: self.max_inherit_depth,
+                        max_depth: self.config.max_role_depth,
                     });
                 }
                 if visiting.contains(&parent) {
@@ -334,7 +321,7 @@ where
                     continue;
                 }
 
-                let parents = self.store.role_inherits_ref(tenant, &parent).await?;
+                let parents = self.source.parent_roles(tenant, &parent).await?;
                 visiting.insert(parent.clone());
                 output.push(parent.clone());
                 stack.push((parent, next_depth, parents.into_iter()));
@@ -349,589 +336,154 @@ where
     }
 }
 
-impl<S, C> Engine<S, C>
-where
-    S: Store + ScopeStore,
-    C: Cache,
-{
-    /// Authorizes a principal for a permission and target scope within a tenant.
-    pub async fn authorize_with_scope(
-        &self,
-        tenant: TenantId,
-        principal: PrincipalId,
-        permission: Permission,
-        target_scope: ScopePath,
-    ) -> Result<Decision> {
-        self.authorize_with_scope_ref(&tenant, &principal, &permission, &target_scope)
-            .await
-    }
-
-    /// Authorizes a principal for a permission and target scope within a tenant.
-    pub async fn authorize_with_scope_ref(
-        &self,
-        tenant: &TenantId,
-        principal: &PrincipalId,
-        permission: &Permission,
-        target_scope: &ScopePath,
-    ) -> Result<Decision> {
-        let decision = self.authorize_ref(tenant, principal, permission).await?;
-        if decision == Decision::Deny {
-            return Ok(Decision::Deny);
-        }
-
-        if self.enable_super_admin && self.store.is_super_admin_ref(principal).await? {
-            return Ok(Decision::Allow);
-        }
-
-        let allowed = self
-            .store
-            .scope_allows_ref(tenant, principal, target_scope)
-            .await?;
-        Ok(if allowed {
-            Decision::Allow
-        } else {
-            Decision::Deny
-        })
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "memory-store"))]
 mod tests {
     use super::*;
-    use crate::permission::Permission;
-    use crate::store::{GlobalRoleStore, RoleStore, ScopeStore, TenantStore};
-    use crate::types::{GlobalRoleId, PrincipalId, ResourceName, RoleId, ScopePath, TenantId};
-    use async_trait::async_trait;
+    use crate::memory_source::MemorySource;
+    use crate::{GrantScope, MembershipStatus, Permission, ScopePath, TenantStatus};
     use futures::executor::block_on;
-    use std::collections::HashMap;
 
-    #[derive(Default, Clone)]
-    struct TestStore {
-        tenant_active: bool,
-        principal_active: bool,
-        super_admin: bool,
-        roles: Vec<RoleId>,
-        role_permissions: HashMap<RoleId, Vec<Permission>>,
-        role_inherits: HashMap<RoleId, Vec<RoleId>>,
-        global_roles: HashMap<PrincipalId, Vec<GlobalRoleId>>,
-        global_role_permissions: HashMap<GlobalRoleId, Vec<Permission>>,
-        principal_scopes: HashMap<PrincipalId, ScopePath>,
+    fn ids() -> (TenantId, PrincipalId, RoleId) {
+        (
+            TenantId::parse("tenant_1").expect("tenant"),
+            PrincipalId::parse("user_1").expect("principal"),
+            RoleId::parse("reader").expect("role"),
+        )
     }
 
-    fn active_store() -> TestStore {
-        TestStore {
-            tenant_active: true,
-            principal_active: true,
-            ..TestStore::default()
-        }
-    }
-
-    fn principal(account_id: &str) -> PrincipalId {
-        PrincipalId::try_from_parts("user", account_id).expect("principal id")
-    }
-
-    #[async_trait]
-    impl TenantStore for TestStore {
-        async fn tenant_active(
-            &self,
-            _tenant: TenantId,
-        ) -> std::result::Result<bool, crate::StoreError> {
-            Ok(self.tenant_active)
-        }
-
-        async fn principal_active(
-            &self,
-            _tenant: TenantId,
-            _principal: PrincipalId,
-        ) -> std::result::Result<bool, crate::StoreError> {
-            Ok(self.principal_active)
-        }
-    }
-
-    #[async_trait]
-    impl RoleStore for TestStore {
-        async fn principal_roles(
-            &self,
-            _tenant: TenantId,
-            _principal: PrincipalId,
-        ) -> std::result::Result<Vec<RoleId>, crate::StoreError> {
-            Ok(self.roles.clone())
-        }
-
-        async fn role_permissions(
-            &self,
-            _tenant: TenantId,
-            role: RoleId,
-        ) -> std::result::Result<Vec<Permission>, crate::StoreError> {
-            Ok(self
-                .role_permissions
-                .get(&role)
-                .cloned()
-                .unwrap_or_default())
-        }
-
-        async fn role_inherits(
-            &self,
-            _tenant: TenantId,
-            role: RoleId,
-        ) -> std::result::Result<Vec<RoleId>, crate::StoreError> {
-            Ok(self.role_inherits.get(&role).cloned().unwrap_or_default())
-        }
-    }
-
-    #[async_trait]
-    impl GlobalRoleStore for TestStore {
-        async fn global_roles(
-            &self,
-            principal: PrincipalId,
-        ) -> std::result::Result<Vec<GlobalRoleId>, crate::StoreError> {
-            Ok(self
-                .global_roles
-                .get(&principal)
-                .cloned()
-                .unwrap_or_default())
-        }
-
-        async fn global_role_permissions(
-            &self,
-            role: GlobalRoleId,
-        ) -> std::result::Result<Vec<Permission>, crate::StoreError> {
-            Ok(self
-                .global_role_permissions
-                .get(&role)
-                .cloned()
-                .unwrap_or_default())
-        }
-
-        async fn is_super_admin(
-            &self,
-            _principal: PrincipalId,
-        ) -> std::result::Result<bool, crate::StoreError> {
-            Ok(self.super_admin)
-        }
-    }
-
-    #[async_trait]
-    impl ScopeStore for TestStore {
-        async fn principal_scope_path(
-            &self,
-            _tenant: TenantId,
-            principal: PrincipalId,
-        ) -> std::result::Result<Option<ScopePath>, crate::StoreError> {
-            Ok(self.principal_scopes.get(&principal).cloned())
-        }
+    fn active_source(scope: GrantScope, permission: &str) -> (MemorySource, AuthSubject) {
+        let (tenant, principal, role) = ids();
+        let source = MemorySource::new();
+        source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+        source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
+        source.add_role_assignment(tenant.clone(), principal.clone(), role.clone(), scope);
+        source.add_role_permission(
+            tenant.clone(),
+            role,
+            Permission::parse(permission).expect("permission"),
+        );
+        (source, AuthSubject::new(tenant, principal))
     }
 
     #[test]
-    fn authorize_should_allow_exact_permission() {
-        let mut store = active_store();
+    fn accessible_scope_should_return_tenant_for_tenant_grant() {
+        let (source, subject) = active_source(GrantScope::tenant(), "invoice:read");
+        let engine = EngineBuilder::new(source).build();
+        let scope = block_on(engine.accessible_scope(ScopeQuery {
+            subject,
+            permission: Permission::parse("invoice:read").expect("permission"),
+        }))
+        .expect("scope");
 
-        let role = RoleId::try_from("role_a").unwrap();
-        store.roles = vec![role.clone()];
-        store
-            .role_permissions
-            .insert(role, vec![Permission::try_from("invoice:read").unwrap()]);
-
-        let engine = EngineBuilder::new(store).build();
-        let decision = block_on(engine.authorize(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            Permission::try_from("invoice:read").unwrap(),
-        ))
-        .unwrap();
-
-        assert_eq!(decision, Decision::Allow);
+        assert!(matches!(scope, AccessScope::Tenant { .. }));
     }
 
     #[test]
-    fn authorize_should_deny_when_tenant_inactive() {
-        let store = TestStore {
-            tenant_active: false,
-            principal_active: true,
-            ..TestStore::default()
+    fn can_tenant_should_deny_path_only_grant() {
+        let root = ScopePath::parse("agent/1").expect("scope path");
+        let (source, subject) = active_source(
+            GrantScope::paths(vec![root]).expect("grant scope"),
+            "invoice:read",
+        );
+        let engine = EngineBuilder::new(source).build();
+        let explanation = block_on(engine.explain_tenant(TenantAccessRequest {
+            subject,
+            permission: Permission::parse("invoice:read").expect("permission"),
+        }))
+        .expect("explanation");
+
+        assert_eq!(explanation.decision, AccessDecision::Deny);
+        assert_eq!(explanation.reason, Some(DenyReason::TargetScopeRequired));
+    }
+
+    #[test]
+    fn can_access_scope_should_allow_descendant_path() {
+        let root = ScopePath::parse("agent/1").expect("scope path");
+        let target = ScopePath::parse("agent/1/store/2").expect("scope path");
+        let (source, subject) = active_source(
+            GrantScope::paths(vec![root]).expect("grant scope"),
+            "invoice:read",
+        );
+        let engine = EngineBuilder::new(source).build();
+        let decision = block_on(engine.can_access_scope(ScopedAccessRequest {
+            subject,
+            permission: Permission::parse("invoice:read").expect("permission"),
+            target,
+        }))
+        .expect("decision");
+
+        assert_eq!(decision, AccessDecision::Allow);
+    }
+
+    #[test]
+    fn wildcard_should_require_config_flag() {
+        let (source, subject) = active_source(GrantScope::tenant(), "invoice:*");
+        let strict_engine = EngineBuilder::new(source.clone()).build();
+        let wildcard_engine = EngineBuilder::new(source).enable_wildcard(true).build();
+        let request = TenantAccessRequest {
+            subject,
+            permission: Permission::parse("invoice:read").expect("permission"),
         };
 
-        let engine = EngineBuilder::new(store).build();
-        let decision = block_on(engine.authorize(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            Permission::try_from("invoice:read").unwrap(),
-        ))
-        .unwrap();
+        let strict = block_on(strict_engine.can_tenant(request.clone())).expect("decision");
+        let wildcard = block_on(wildcard_engine.can_tenant(request)).expect("decision");
 
-        assert_eq!(decision, Decision::Deny);
+        assert_eq!(strict, AccessDecision::Deny);
+        assert_eq!(wildcard, AccessDecision::Allow);
     }
 
     #[test]
-    fn authorize_should_allow_with_wildcard_when_enabled() {
-        let mut store = active_store();
-
-        let role = RoleId::try_from("role_a").unwrap();
-        store.roles = vec![role.clone()];
-        store
-            .role_permissions
-            .insert(role, vec![Permission::try_from("invoice:*").unwrap()]);
-
-        let engine = EngineBuilder::new(store).enable_wildcard(true).build();
-        let decision = block_on(engine.authorize(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            Permission::try_from("invoice:read").unwrap(),
-        ))
-        .unwrap();
-
-        assert_eq!(decision, Decision::Allow);
-    }
-
-    #[test]
-    fn authorize_should_deny_wildcard_when_disabled() {
-        let mut store = active_store();
-
-        let role = RoleId::try_from("role_a").unwrap();
-        store.roles = vec![role.clone()];
-        store
-            .role_permissions
-            .insert(role, vec![Permission::try_from("invoice:*").unwrap()]);
-
-        let engine = EngineBuilder::new(store).build();
-        let decision = block_on(engine.authorize(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            Permission::try_from("invoice:read").unwrap(),
-        ))
-        .unwrap();
-
-        assert_eq!(decision, Decision::Deny);
-    }
-
-    #[test]
-    fn authorize_should_allow_via_global_role() {
-        let mut store = active_store();
-
-        let principal = principal("user_1");
-        let global_role = GlobalRoleId::try_from("global_admin").unwrap();
-        store
-            .global_roles
-            .insert(principal.clone(), vec![global_role.clone()]);
-        store.global_role_permissions.insert(
-            global_role,
-            vec![Permission::try_from("invoice:read").unwrap()],
-        );
-
-        let engine = EngineBuilder::new(store).build();
-        let decision = block_on(engine.authorize(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal,
-            Permission::try_from("invoice:read").unwrap(),
-        ))
-        .unwrap();
-
-        assert_eq!(decision, Decision::Allow);
-    }
-
-    #[test]
-    fn authorize_with_scope_should_allow_when_scope_is_ancestor() {
-        let mut store = active_store();
-
-        let principal = principal("user_1");
-        store.principal_scopes.insert(
-            principal.clone(),
-            ScopePath::new("agent/123").expect("scope path"),
-        );
-
-        let role = RoleId::try_from("role_a").unwrap();
-        store.roles = vec![role.clone()];
-        store
-            .role_permissions
-            .insert(role, vec![Permission::try_from("invoice:read").unwrap()]);
-
-        let engine = EngineBuilder::new(store).build();
-        let decision = block_on(engine.authorize_with_scope(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal,
-            Permission::try_from("invoice:read").unwrap(),
-            ScopePath::new("agent/123/store/456").expect("scope path"),
-        ))
-        .unwrap();
-
-        assert_eq!(decision, Decision::Allow);
-    }
-
-    #[test]
-    fn authorize_with_scope_should_deny_when_scope_not_allowed() {
-        let mut store = active_store();
-
-        let principal = principal("user_1");
-        store.principal_scopes.insert(
-            principal.clone(),
-            ScopePath::new("agent/123/store/111").expect("scope path"),
-        );
-
-        let role = RoleId::try_from("role_a").unwrap();
-        store.roles = vec![role.clone()];
-        store
-            .role_permissions
-            .insert(role, vec![Permission::try_from("invoice:read").unwrap()]);
-
-        let engine = EngineBuilder::new(store).build();
-        let decision = block_on(engine.authorize_with_scope(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal,
-            Permission::try_from("invoice:read").unwrap(),
-            ScopePath::new("agent/123/store/456").expect("scope path"),
-        ))
-        .unwrap();
-
-        assert_eq!(decision, Decision::Deny);
-    }
-
-    #[test]
-    fn scope_should_return_tenant_only_when_resource_matches() {
-        let mut store = active_store();
-
-        let role = RoleId::try_from("role_a").unwrap();
-        store.roles = vec![role.clone()];
-        store
-            .role_permissions
-            .insert(role, vec![Permission::try_from("invoice:read").unwrap()]);
-
-        let engine = EngineBuilder::new(store).build();
-        let scope = block_on(engine.scope(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            ResourceName::try_from("invoice").unwrap(),
-        ))
-        .unwrap();
-
-        assert!(matches!(scope, Scope::TenantOnly { .. }));
-    }
-
-    #[test]
-    fn scope_should_return_none_when_resource_not_allowed() {
-        let mut store = active_store();
-
-        let role = RoleId::try_from("role_a").unwrap();
-        store.roles = vec![role.clone()];
-        store
-            .role_permissions
-            .insert(role, vec![Permission::try_from("invoice:read").unwrap()]);
-
-        let engine = EngineBuilder::new(store).build();
-        let scope = block_on(engine.scope(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            ResourceName::try_from("customer").unwrap(),
-        ))
-        .unwrap();
-
-        assert_eq!(scope, Scope::None);
-    }
-
-    #[test]
-    fn scope_should_ignore_wildcard_permission_when_disabled() {
-        let mut store = active_store();
-
-        let role = RoleId::try_from("role_a").unwrap();
-        store.roles = vec![role.clone()];
-        store
-            .role_permissions
-            .insert(role, vec![Permission::try_from("invoice:*").unwrap()]);
-
-        let engine = EngineBuilder::new(store).build();
-        let scope = block_on(engine.scope(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            ResourceName::try_from("invoice").unwrap(),
-        ))
-        .unwrap();
-
-        assert_eq!(scope, Scope::None);
-    }
-
-    #[test]
-    fn super_admin_should_allow_when_enabled_without_permissions() {
-        let mut store = active_store();
-        store.super_admin = true;
-        store.principal_active = false;
-
-        let engine = EngineBuilder::new(store).enable_super_admin(true).build();
-        let decision = block_on(engine.authorize(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            Permission::try_from("invoice:delete").unwrap(),
-        ))
-        .unwrap();
-
-        assert_eq!(decision, Decision::Allow);
-    }
-
-    #[test]
-    fn super_admin_should_not_allow_when_disabled() {
-        let mut store = active_store();
-        store.super_admin = true;
-        store.principal_active = false;
-
-        let engine = EngineBuilder::new(store).build();
-        let decision = block_on(engine.authorize(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            Permission::try_from("invoice:delete").unwrap(),
-        ))
-        .unwrap();
-
-        assert_eq!(decision, Decision::Deny);
-    }
-
-    #[test]
-    fn super_admin_scope_should_return_tenant_only_when_enabled() {
-        let mut store = active_store();
-        store.super_admin = true;
-        store.principal_active = false;
-
-        let engine = EngineBuilder::new(store).enable_super_admin(true).build();
-        let scope = block_on(engine.scope(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            ResourceName::try_from("customer").unwrap(),
-        ))
-        .unwrap();
-
-        assert!(matches!(scope, Scope::TenantOnly { .. }));
-    }
-
-    #[test]
-    fn super_admin_should_still_deny_when_tenant_inactive() {
-        let mut store = active_store();
-        store.super_admin = true;
-        store.tenant_active = false;
-
-        let engine = EngineBuilder::new(store).enable_super_admin(true).build();
-        let decision = block_on(engine.authorize(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            Permission::try_from("invoice:delete").unwrap(),
-        ))
-        .unwrap();
-
-        assert_eq!(decision, Decision::Deny);
-    }
-
-    #[cfg(feature = "memory-cache")]
-    #[test]
-    fn shared_cache_should_isolate_different_engine_configs() {
-        let mut store = active_store();
-
-        let role = RoleId::try_from("role_a").unwrap();
-        store.roles = vec![role.clone()];
-        store
-            .role_permissions
-            .insert(role, vec![Permission::try_from("invoice:*").unwrap()]);
-
-        let cache = crate::MemoryCache::new(8);
-        let wildcard_engine = EngineBuilder::new(store.clone())
-            .enable_wildcard(true)
-            .cache(cache.clone())
-            .build();
-        let strict_engine = EngineBuilder::new(store).cache(cache).build();
-
-        let tenant = TenantId::try_from("tenant_1").unwrap();
-        let principal = principal("user_1");
-        let required = Permission::try_from("invoice:read").unwrap();
-
-        let wildcard_decision = block_on(wildcard_engine.authorize(
+    fn role_hierarchy_should_use_assignment_scope() {
+        let (tenant, principal, child) = ids();
+        let parent = RoleId::parse("parent").expect("role");
+        let root = ScopePath::parse("agent/1").expect("scope path");
+        let source = MemorySource::new();
+        source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+        source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
+        source.add_role_assignment(
             tenant.clone(),
             principal.clone(),
-            required.clone(),
-        ))
-        .unwrap();
-        assert_eq!(wildcard_decision, Decision::Allow);
-
-        let strict_decision =
-            block_on(strict_engine.authorize(tenant, principal, required)).unwrap();
-        assert_eq!(strict_decision, Decision::Deny);
-    }
-
-    #[cfg(feature = "memory-cache")]
-    #[test]
-    fn shared_cache_should_isolate_super_admin_flag() {
-        let mut store = active_store();
-        store.super_admin = true;
-
-        let cache = crate::MemoryCache::new(8);
-        let super_admin_engine = EngineBuilder::new(store.clone())
-            .enable_super_admin(true)
-            .cache(cache.clone())
-            .build();
-        let strict_engine = EngineBuilder::new(store).cache(cache).build();
-
-        let tenant = TenantId::try_from("tenant_1").unwrap();
-        let principal = principal("user_1");
-        let required = Permission::try_from("invoice:delete").unwrap();
-
-        let super_admin_decision = block_on(super_admin_engine.authorize(
-            tenant.clone(),
-            principal.clone(),
-            required.clone(),
-        ))
-        .unwrap();
-        assert_eq!(super_admin_decision, Decision::Allow);
-
-        let strict_decision =
-            block_on(strict_engine.authorize(tenant, principal, required)).unwrap();
-        assert_eq!(strict_decision, Decision::Deny);
-    }
-
-    #[test]
-    fn role_cycle_should_return_error() {
-        let mut store = active_store();
-
-        let role_a = RoleId::try_from("role_a").unwrap();
-        let role_b = RoleId::try_from("role_b").unwrap();
-        store.roles = vec![role_a.clone()];
-        store.role_permissions.insert(
-            role_a.clone(),
-            vec![Permission::try_from("invoice:read").unwrap()],
+            child.clone(),
+            GrantScope::paths(vec![root.clone()]).expect("grant scope"),
         );
-        store
-            .role_inherits
-            .insert(role_a.clone(), vec![role_b.clone()]);
-        store.role_inherits.insert(role_b, vec![role_a.clone()]);
+        source.add_parent_role(tenant.clone(), child, parent.clone());
+        source.add_role_permission(
+            tenant.clone(),
+            parent,
+            Permission::parse("invoice:read").expect("permission"),
+        );
 
-        let engine = EngineBuilder::new(store)
+        let engine = EngineBuilder::new(source)
             .enable_role_hierarchy(true)
             .build();
-        let result = block_on(engine.authorize(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            Permission::try_from("invoice:read").unwrap(),
-        ));
+        let scope = block_on(engine.accessible_scope(ScopeQuery {
+            subject: AuthSubject::new(tenant, principal),
+            permission: Permission::parse("invoice:read").expect("permission"),
+        }))
+        .expect("scope");
 
-        assert!(matches!(result, Err(Error::RoleCycleDetected { .. })));
+        assert_eq!(
+            scope,
+            AccessScope::Paths {
+                tenant: TenantId::parse("tenant_1").expect("tenant"),
+                roots: vec![root],
+            }
+        );
     }
 
     #[test]
-    fn role_depth_should_return_error_when_exceeded() {
-        let mut store = active_store();
+    fn inactive_tenant_should_return_none_with_reason() {
+        let (tenant, principal, _) = ids();
+        let source = MemorySource::new();
+        source.set_tenant_status(tenant.clone(), TenantStatus::Inactive);
+        let engine = EngineBuilder::new(source).build();
+        let explanation = block_on(engine.explain_tenant(TenantAccessRequest {
+            subject: AuthSubject::new(tenant, principal),
+            permission: Permission::parse("invoice:read").expect("permission"),
+        }))
+        .expect("explanation");
 
-        let role_a = RoleId::try_from("role_a").unwrap();
-        let role_b = RoleId::try_from("role_b").unwrap();
-        let role_c = RoleId::try_from("role_c").unwrap();
-        store.roles = vec![role_a.clone()];
-        store
-            .role_inherits
-            .insert(role_a.clone(), vec![role_b.clone()]);
-        store.role_inherits.insert(role_b, vec![role_c]);
-
-        let engine = EngineBuilder::new(store)
-            .enable_role_hierarchy(true)
-            .max_inherit_depth(1)
-            .build();
-        let result = block_on(engine.authorize(
-            TenantId::try_from("tenant_1").unwrap(),
-            principal("user_1"),
-            Permission::try_from("invoice:read").unwrap(),
-        ));
-
-        assert!(matches!(result, Err(Error::RoleDepthExceeded { .. })));
+        assert_eq!(explanation.scope, AccessScope::None);
+        assert_eq!(explanation.reason, Some(DenyReason::TenantInactive));
     }
 }

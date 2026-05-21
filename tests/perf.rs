@@ -2,8 +2,9 @@
 
 use futures::executor::block_on;
 use rs_tenant::{
-    Decision, EngineBuilder, MemoryCache, MemoryStore, Permission, PrincipalId, ResourceName,
-    RoleId, Scope, TenantId,
+    AccessDecision, AuthSubject, EngineBuilder, GrantScope, MembershipStatus, MemoryCache,
+    MemorySource, Permission, PrincipalId, RoleId, ScopePath, ScopedAccessRequest,
+    TenantAccessRequest, TenantId, TenantStatus,
 };
 use std::hint::black_box;
 use std::sync::Arc;
@@ -11,16 +12,11 @@ use std::time::{Duration, Instant};
 
 const REPEATS: usize = 5;
 
-fn principal(account_id: &str) -> PrincipalId {
-    PrincipalId::try_from_parts("perf", account_id).expect("principal id")
-}
-
 fn benchmark_sync<F>(name: &str, iterations: usize, mut op: F)
 where
     F: FnMut(),
 {
     let mut samples = Vec::with_capacity(REPEATS);
-
     for _ in 0..REPEATS {
         let start = Instant::now();
         for _ in 0..iterations {
@@ -28,7 +24,6 @@ where
         }
         samples.push(start.elapsed());
     }
-
     samples.sort_unstable();
     let median = samples[REPEATS / 2];
     let total_ms = median.as_secs_f64() * 1_000.0;
@@ -77,94 +72,138 @@ where
     );
 }
 
-fn setup_flat_store() -> (MemoryStore, TenantId, PrincipalId, Permission, ResourceName) {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_perf").unwrap();
-    let principal = principal("principal_perf");
-    let role = RoleId::try_from("role_reader").unwrap();
-    let permission = Permission::try_from("invoice:read").unwrap();
-    let resource = ResourceName::try_from("invoice").unwrap();
+fn setup_flat_source() -> (MemorySource, AuthSubject, Permission, ScopePath) {
+    let source = MemorySource::new();
+    let tenant = TenantId::parse("tenant_perf").unwrap();
+    let principal = PrincipalId::parse("principal_perf").unwrap();
+    let role = RoleId::parse("role_reader").unwrap();
+    let permission = Permission::parse("invoice:read").unwrap();
+    let scope = ScopePath::parse("agent/1").unwrap();
 
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
-    store.add_principal_role(tenant.clone(), principal.clone(), role.clone());
-    store.add_role_permission(tenant.clone(), role, permission.clone());
+    source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+    source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
+    source.add_role_assignment(
+        tenant.clone(),
+        principal.clone(),
+        role.clone(),
+        GrantScope::paths(vec![scope.clone()]).unwrap(),
+    );
+    source.add_role_permission(tenant, role, permission.clone());
 
-    (store, tenant, principal, permission, resource)
+    (
+        source,
+        AuthSubject::new(TenantId::parse("tenant_perf").unwrap(), principal),
+        permission,
+        scope,
+    )
 }
 
-fn setup_hierarchy_store(
-    depth: usize,
-) -> (
-    MemoryStore,
-    TenantId,
-    PrincipalId,
-    Permission,
-    ResourceName,
-    usize,
-) {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_hier_perf").unwrap();
-    let principal = principal("principal_hier_perf");
-    let permission = Permission::try_from("invoice:read").unwrap();
-    let resource = ResourceName::try_from("invoice").unwrap();
+fn setup_hierarchy_source(depth: usize) -> (MemorySource, AuthSubject, Permission, usize) {
+    let source = MemorySource::new();
+    let tenant = TenantId::parse("tenant_hier_perf").unwrap();
+    let principal = PrincipalId::parse("principal_hier_perf").unwrap();
+    let permission = Permission::parse("invoice:read").unwrap();
+    let scope = ScopePath::parse("agent/1").unwrap();
 
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
+    source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+    source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
 
-    let first_role = RoleId::try_from("role_chain_0").unwrap();
-    store.add_principal_role(tenant.clone(), principal.clone(), first_role);
+    let first_role = RoleId::parse("role_chain_0").unwrap();
+    source.add_role_assignment(
+        tenant.clone(),
+        principal.clone(),
+        first_role,
+        GrantScope::paths(vec![scope]).unwrap(),
+    );
 
     for i in 0..depth {
-        let current = RoleId::try_from(format!("role_chain_{i}").as_str()).unwrap();
-        let next = RoleId::try_from(format!("role_chain_{}", i + 1).as_str()).unwrap();
-        store.add_role_inherit(tenant.clone(), current, next);
+        let current = RoleId::parse(format!("role_chain_{i}").as_str()).unwrap();
+        let next = RoleId::parse(format!("role_chain_{}", i + 1).as_str()).unwrap();
+        source.add_parent_role(tenant.clone(), current, next);
     }
 
-    let tail = RoleId::try_from(format!("role_chain_{depth}").as_str()).unwrap();
-    store.add_role_permission(tenant.clone(), tail, permission.clone());
+    let tail = RoleId::parse(format!("role_chain_{depth}").as_str()).unwrap();
+    source.add_role_permission(tenant.clone(), tail, permission.clone());
 
-    (store, tenant, principal, permission, resource, depth)
+    (
+        source,
+        AuthSubject::new(tenant, principal),
+        permission,
+        depth,
+    )
 }
 
 #[test]
 #[ignore = "manual performance test; run with --ignored --nocapture"]
-fn perf_authorize_and_scope() {
+fn perf_can_tenant_and_scoped_access() {
     let iterations = 200_000;
 
-    let (store, tenant, principal, permission, _resource) = setup_flat_store();
-    let engine = EngineBuilder::new(store).build();
-    benchmark_sync("authorize_flat_no_cache", iterations, || {
-        let result = block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
+    let (source, subject, permission, scope) = setup_flat_source();
+    let engine = EngineBuilder::new(source).build();
+    benchmark_sync("can_access_scope_flat_no_cache", iterations, || {
+        let result = block_on(engine.can_access_scope(ScopedAccessRequest {
+            subject: subject.clone(),
+            permission: permission.clone(),
+            target: scope.clone(),
+        }))
+        .unwrap();
         black_box(result);
     });
 
-    let (store, tenant, principal, permission, resource) = setup_flat_store();
-    let engine = EngineBuilder::new(store)
+    let (source, subject, permission, scope) = setup_flat_source();
+    let tenant_source = source.clone();
+    let tenant_role = RoleId::parse("tenant_admin").unwrap();
+    tenant_source.add_role_assignment(
+        subject.tenant.clone(),
+        subject.principal.clone(),
+        tenant_role.clone(),
+        GrantScope::tenant(),
+    );
+    tenant_source.add_role_permission(subject.tenant.clone(), tenant_role, permission.clone());
+    let engine = EngineBuilder::new(source)
         .cache(MemoryCache::new(8_192).with_ttl(Duration::from_secs(60)))
         .build();
-    let warm = block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
-    assert_eq!(warm, Decision::Allow);
-    benchmark_sync("authorize_flat_hot_cache", iterations, || {
-        let result = block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
+    let warm = block_on(engine.can_tenant(TenantAccessRequest {
+        subject: subject.clone(),
+        permission: permission.clone(),
+    }))
+    .unwrap();
+    assert_eq!(warm, AccessDecision::Allow);
+    benchmark_sync("can_tenant_hot_cache", iterations, || {
+        let result = block_on(engine.can_tenant(TenantAccessRequest {
+            subject: subject.clone(),
+            permission: permission.clone(),
+        }))
+        .unwrap();
         black_box(result);
     });
 
-    benchmark_sync("scope_flat_hot_cache", iterations, || {
-        let result = block_on(engine.scope_ref(&tenant, &principal, &resource)).unwrap();
+    benchmark_sync("can_access_scope_hot_cache", iterations, || {
+        let result = block_on(engine.can_access_scope(ScopedAccessRequest {
+            subject: subject.clone(),
+            permission: permission.clone(),
+            target: scope.clone(),
+        }))
+        .unwrap();
         black_box(result);
     });
 
-    let (store, tenant, principal, permission, _, depth) = setup_hierarchy_store(8);
-    let engine = EngineBuilder::new(store)
+    let (source, subject, permission, depth) = setup_hierarchy_source(8);
+    let engine = EngineBuilder::new(source)
         .enable_role_hierarchy(true)
-        .max_inherit_depth(depth + 2)
+        .max_role_depth(depth + 2)
         .build();
     benchmark_sync(
-        "authorize_hierarchy_depth8_no_cache",
+        "can_access_scope_hierarchy_depth8_no_cache",
         iterations / 4,
         || {
-            let result = block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
+            let target = ScopePath::parse("agent/1/store/2").unwrap();
+            let result = block_on(engine.can_access_scope(ScopedAccessRequest {
+                subject: subject.clone(),
+                permission: permission.clone(),
+                target,
+            }))
+            .unwrap();
             black_box(result);
         },
     );
@@ -174,76 +213,39 @@ fn perf_authorize_and_scope() {
         .unwrap_or(4);
     let iterations_per_thread = 50_000;
 
-    let (store, tenant, principal, permission, _) = setup_flat_store();
-    let engine_single_shard = Arc::new(
-        EngineBuilder::new(store)
+    let (source, subject, permission, scope) = setup_flat_source();
+    let engine = Arc::new(
+        EngineBuilder::new(source)
             .cache(
                 MemoryCache::new(8_192)
-                    .with_shards(1)
+                    .with_shards(8)
                     .with_ttl(Duration::from_secs(60)),
             )
             .build(),
     );
-    let warm =
-        block_on(engine_single_shard.authorize_ref(&tenant, &principal, &permission)).unwrap();
-    assert_eq!(warm, Decision::Allow);
-    let tenant_for_single_verify = tenant.clone();
-    let principal_for_single_verify = principal.clone();
-
-    let engine_single_for_parallel = Arc::clone(&engine_single_shard);
-    benchmark_parallel(
-        "authorize_flat_hot_cache_parallel_single_shard",
-        threads,
-        iterations_per_thread,
-        move || {
-            let engine = Arc::clone(&engine_single_for_parallel);
-            let tenant = tenant.clone();
-            let principal = principal.clone();
-            let permission = permission.clone();
-            Box::new(move || {
-                let result =
-                    block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
-                black_box(result);
-            })
-        },
-    );
-
-    let verify_resource = ResourceName::try_from("invoice").unwrap();
-    let scope = block_on(engine_single_shard.scope_ref(
-        &tenant_for_single_verify,
-        &principal_for_single_verify,
-        &verify_resource,
-    ))
+    let _ = block_on(engine.can_access_scope(ScopedAccessRequest {
+        subject: subject.clone(),
+        permission: permission.clone(),
+        target: scope.clone(),
+    }))
     .unwrap();
-    assert!(matches!(scope, Scope::TenantOnly { .. }));
 
-    let (store, tenant, principal, permission, _) = setup_flat_store();
-    let shard_count = threads.min(16);
-    let engine_sharded = Arc::new(
-        EngineBuilder::new(store)
-            .cache(
-                MemoryCache::new(8_192)
-                    .with_shards(shard_count)
-                    .with_ttl(Duration::from_secs(60)),
-            )
-            .build(),
-    );
-    let warm = block_on(engine_sharded.authorize_ref(&tenant, &principal, &permission)).unwrap();
-    assert_eq!(warm, Decision::Allow);
-
-    let engine_sharded_for_parallel = Arc::clone(&engine_sharded);
     benchmark_parallel(
-        "authorize_flat_hot_cache_parallel_sharded",
+        "can_access_scope_hot_cache_parallel",
         threads,
         iterations_per_thread,
         move || {
-            let engine = Arc::clone(&engine_sharded_for_parallel);
-            let tenant = tenant.clone();
-            let principal = principal.clone();
+            let engine = Arc::clone(&engine);
+            let subject = subject.clone();
             let permission = permission.clone();
+            let scope = scope.clone();
             Box::new(move || {
-                let result =
-                    block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
+                let result = block_on(engine.can_access_scope(ScopedAccessRequest {
+                    subject: subject.clone(),
+                    permission: permission.clone(),
+                    target: scope.clone(),
+                }))
+                .unwrap();
                 black_box(result);
             })
         },

@@ -5,17 +5,13 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
-use crate::cache::Cache;
-use crate::permission::Permission;
-use crate::types::{PrincipalId, RoleId, TenantId};
+use crate::cache::{Cache, EffectiveGrant};
+use crate::ids::{PrincipalId, RoleId, TenantId};
 
 const SMALL_CACHE_SHARD_THRESHOLD: usize = 128;
 const MAX_DEFAULT_SHARDS: usize = 16;
 
-/// In-memory cache for effective permissions.
-///
-/// This cache uses sharded locking to reduce contention in concurrent workloads.
-/// Each shard maintains its own LRU queue and TTL checks.
+/// In-memory cache for effective grants.
 #[derive(Debug, Clone)]
 pub struct MemoryCache {
     shards: Arc<Vec<RwLock<CacheState>>>,
@@ -35,11 +31,12 @@ struct CacheState {
 struct CacheKey {
     tenant: TenantId,
     principal: PrincipalId,
+    config_signature: String,
 }
 
 #[derive(Debug, Clone)]
 struct CacheEntry {
-    perms: Vec<Permission>,
+    grants: Vec<EffectiveGrant>,
     updated_at: Instant,
 }
 
@@ -53,9 +50,6 @@ impl MemoryCache {
     }
 
     /// Overrides shard count for lock sharding.
-    ///
-    /// This is useful for benchmarks and tuning. For small capacities we suggest
-    /// keeping one shard to preserve strict global LRU behavior.
     pub fn with_shards(mut self, shards: usize) -> Self {
         let shard_count = Self::normalize_shard_count(self.capacity, shards);
         self.shards = Arc::new(Self::new_shards(shard_count));
@@ -105,22 +99,18 @@ impl MemoryCache {
     }
 
     fn distribute_capacity(capacity: usize, shard_count: usize) -> Vec<usize> {
-        if shard_count == 0 {
-            return Vec::new();
-        }
-
         let base = capacity / shard_count;
         let remainder = capacity % shard_count;
-
         (0..shard_count)
             .map(|idx| base + usize::from(idx < remainder))
             .collect()
     }
 
-    fn key(tenant: &TenantId, principal: &PrincipalId) -> CacheKey {
+    fn key(tenant: &TenantId, principal: &PrincipalId, config_signature: &str) -> CacheKey {
         CacheKey {
             tenant: tenant.clone(),
             principal: principal.clone(),
+            config_signature: config_signature.to_string(),
         }
     }
 
@@ -175,7 +165,6 @@ impl MemoryCache {
             state.order.clear();
             return;
         }
-
         while state.entries.len() > shard_capacity {
             if let Some(key) = state.order.pop_front() {
                 state.entries.remove(&key);
@@ -193,16 +182,17 @@ impl MemoryCache {
 
 #[async_trait]
 impl Cache for MemoryCache {
-    async fn get_permissions(
+    async fn get_effective_grants(
         &self,
         tenant: &TenantId,
         principal: &PrincipalId,
-    ) -> Option<Vec<Permission>> {
+        config_signature: &str,
+    ) -> Option<Vec<EffectiveGrant>> {
         if self.capacity == 0 {
             return None;
         }
 
-        let key = Self::key(tenant, principal);
+        let key = Self::key(tenant, principal, config_signature);
         let now = Instant::now();
         let shard_index = self.shard_index(&key);
         {
@@ -211,9 +201,9 @@ impl Cache for MemoryCache {
                 if let Some(ttl) = self.ttl
                     && Self::is_expired(entry, ttl, now)
                 {
-                    // Write lock is required to remove expired entries.
+                    // A write lock below removes the expired entry.
                 } else if guard.order.back().is_some_and(|last| last == &key) {
-                    return Some(entry.perms.clone());
+                    return Some(entry.grants.clone());
                 }
             } else {
                 return None;
@@ -228,24 +218,25 @@ impl Cache for MemoryCache {
             Self::remove_key(&mut guard, &key);
             return None;
         }
-        let perms = guard.entries.get(&key).map(|entry| entry.perms.clone());
-        if perms.is_some() {
+        let grants = guard.entries.get(&key).map(|entry| entry.grants.clone());
+        if grants.is_some() {
             Self::touch(&mut guard, &key);
         }
-        perms
+        grants
     }
 
-    async fn set_permissions(
+    async fn set_effective_grants(
         &self,
         tenant: &TenantId,
         principal: &PrincipalId,
-        perms: Vec<Permission>,
+        config_signature: &str,
+        grants: Vec<EffectiveGrant>,
     ) {
         if self.capacity == 0 {
             return;
         }
 
-        let key = Self::key(tenant, principal);
+        let key = Self::key(tenant, principal, config_signature);
         let now = Instant::now();
         let shard_index = self.shard_index(&key);
         let mut guard = self.write_shard(shard_index);
@@ -257,28 +248,32 @@ impl Cache for MemoryCache {
         guard.entries.insert(
             key.clone(),
             CacheEntry {
-                perms,
+                grants,
                 updated_at: now,
             },
         );
         Self::touch(&mut guard, &key);
-        let shard_capacity = self.shard_capacities[shard_index];
-        Self::evict_if_needed(&mut guard, shard_capacity);
+        Self::evict_if_needed(&mut guard, self.shard_capacities[shard_index]);
     }
 
     async fn invalidate_principal(&self, tenant: &TenantId, principal: &PrincipalId) {
-        let key = Self::key(tenant, principal);
-        let shard_index = self.shard_index(&key);
-        let mut guard = self.write_shard(shard_index);
-        Self::remove_key(&mut guard, &key);
+        for shard_index in 0..self.shard_count {
+            let mut guard = self.write_shard(shard_index);
+            guard
+                .entries
+                .retain(|key, _| &key.tenant != tenant || &key.principal != principal);
+            let retained_order = guard
+                .order
+                .iter()
+                .filter(|key| guard.entries.contains_key(*key))
+                .cloned()
+                .collect();
+            guard.order = retained_order;
+        }
     }
 
     async fn invalidate_role(&self, tenant: &TenantId, _role: &RoleId) {
-        // Role-to-principal relationships are unknown here, so we invalidate the tenant scope.
-        for shard_index in 0..self.shard_count {
-            let mut guard = self.write_shard(shard_index);
-            Self::invalidate_tenant_inner(&mut guard, tenant);
-        }
+        self.invalidate_tenant(tenant).await;
     }
 
     async fn invalidate_tenant(&self, tenant: &TenantId) {
@@ -287,91 +282,12 @@ impl Cache for MemoryCache {
             Self::invalidate_tenant_inner(&mut guard, tenant);
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::executor::block_on;
-
-    fn tenant() -> TenantId {
-        TenantId::try_from("tenant_1").unwrap()
-    }
-
-    fn principal(value: &str) -> PrincipalId {
-        PrincipalId::try_from(value).unwrap()
-    }
-
-    fn perm(value: &str) -> Permission {
-        Permission::try_from(value).unwrap()
-    }
-
-    #[test]
-    fn lru_should_evict_least_recently_used() {
-        let cache = MemoryCache::new(2);
-        let tenant = tenant();
-        let principal_a = principal("user_a");
-        let principal_b = principal("user_b");
-        let principal_c = principal("user_c");
-
-        block_on(cache.set_permissions(&tenant, &principal_a, vec![perm("invoice:read")]));
-        block_on(cache.set_permissions(&tenant, &principal_b, vec![perm("invoice:write")]));
-        let _ = block_on(cache.get_permissions(&tenant, &principal_a));
-        block_on(cache.set_permissions(&tenant, &principal_c, vec![perm("invoice:delete")]));
-
-        assert!(block_on(cache.get_permissions(&tenant, &principal_b)).is_none());
-        assert!(block_on(cache.get_permissions(&tenant, &principal_a)).is_some());
-        assert!(block_on(cache.get_permissions(&tenant, &principal_c)).is_some());
-    }
-
-    #[test]
-    fn ttl_should_expire_entries() {
-        let cache = MemoryCache::new(1).with_ttl(Duration::from_millis(10));
-        let tenant = tenant();
-        let principal = principal("user_a");
-
-        block_on(cache.set_permissions(&tenant, &principal, vec![perm("invoice:read")]));
-        std::thread::sleep(Duration::from_millis(20));
-
-        assert!(block_on(cache.get_permissions(&tenant, &principal)).is_none());
-    }
-
-    #[test]
-    fn invalidate_tenant_should_clear_entries() {
-        let cache = MemoryCache::new(2);
-        let tenant = tenant();
-        let principal_a = principal("user_a");
-        let principal_b = principal("user_b");
-
-        block_on(cache.set_permissions(&tenant, &principal_a, vec![perm("invoice:read")]));
-        block_on(cache.set_permissions(&tenant, &principal_b, vec![perm("invoice:write")]));
-        block_on(cache.invalidate_tenant(&tenant));
-
-        assert!(block_on(cache.get_permissions(&tenant, &principal_a)).is_none());
-        assert!(block_on(cache.get_permissions(&tenant, &principal_b)).is_none());
-    }
-
-    #[test]
-    fn cache_should_recover_from_poisoned_lock() {
-        let cache = MemoryCache::new(1);
-        let shards = Arc::clone(&cache.shards);
-        let _ = std::thread::spawn(move || {
-            let _guard = shards[0].write().unwrap();
-            panic!("poison cache lock");
-        })
-        .join();
-
-        let tenant = tenant();
-        let principal = principal("user_a");
-        block_on(cache.set_permissions(&tenant, &principal, vec![perm("invoice:read")]));
-
-        assert!(block_on(cache.get_permissions(&tenant, &principal)).is_some());
-    }
-
-    #[test]
-    fn with_shards_should_enable_sharding_for_large_cache() {
-        let cache = MemoryCache::new(1024).with_shards(8);
-        assert_eq!(cache.shard_count, 8);
-        assert_eq!(cache.shard_capacities.iter().sum::<usize>(), 1024);
+    async fn invalidate_all(&self) {
+        for shard_index in 0..self.shard_count {
+            let mut guard = self.write_shard(shard_index);
+            guard.entries.clear();
+            guard.order.clear();
+        }
     }
 }

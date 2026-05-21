@@ -1,214 +1,149 @@
 # rs-tenant
 
-Rust 多租户 RBAC 授权库。
+`rs-tenant` 是面向 Rust SaaS 系统的租户内 RBAC 授权内核。v0.3.0 的核心目标是回答一个问题：
 
-`rs-tenant` 提供一个可插拔的授权引擎，目标是将“权限决策”与“业务存储实现”解耦：
+> 某个主体在某个租户内，基于角色分配，是否拥有某个权限，以及该权限对应的数据范围是什么。
 
-- 在租户上下文内进行授权判定：`authorize`
-- 在租户上下文内进行“权限 + 目标层级作用域”联合判定：`authorize_with_scope`
-- 在查询前计算可访问范围：`scope`
-- 通过 `Store` trait 接入任意数据库/缓存
+默认策略是 deny-by-default：租户无效、成员无效、没有角色分配、没有匹配权限、没有显式范围或数据源读取失败，都不会被静默放行。
 
-默认策略为 `Deny by default`。
-
-## 适用场景
+## v0.3.0 定位
 
 适合：
 
-- SaaS 多租户系统
-- 同时存在租户角色与平台全局角色的系统
-- 希望将权限判断从业务逻辑中抽离的服务
+- 租户内 RBAC 授权。
+- 需要在查询前得到可访问数据范围的 SaaS 系统。
+- 希望用强类型模型约束权限、角色、主体、范围的 Rust 服务。
+- 希望把授权数据读取与授权规则计算分离的项目。
 
 不适合：
 
-- 以复杂 ABAC 为主的授权模型
-- 需要库内直接托管 ORM 模型与迁移
+- 通用策略语言或复杂 ABAC。
+- 平台跨租户授权框架。
+- super admin 绕过框架。
+- Casbin 的完整替代品。
+- ORM、迁移、用户/组织/租户后台管理系统。
 
-## 核心能力
+## 核心 API
 
-- 强类型 ID：`TenantId`、`PrincipalId`、`RoleId`、`GlobalRoleId`
-- 权限模型：`resource:action`（如 `invoice:read`）
-- 租户角色 + 平台角色并集授权
-- 可选角色继承（含环检测、深度限制）
-- 可选 wildcard（如 `*:*`、`invoice:*`）
-- 可选超级管理员短路授权
-- 层级作用域授权（`ScopePath` + `ScopeStore`，支持祖先路径放行）
-- 可选内存缓存（TTL、LRU、分片）
-- Axum 中间件集成（可选 JWT 解析）
+v0.3.0 公开 API 围绕三类调用组织：
 
-## 快速开始
+- `Engine::accessible_scope(ScopeQuery)`：查询某个权限对应的最终数据范围。
+- `Engine::can_access_scope(ScopedAccessRequest)`：判断某个目标路径是否可访问。
+- `Engine::can_tenant(TenantAccessRequest)`：判断是否拥有全租户范围的权限。
+- `Engine::explain_*`：返回轻量解释结果，用于日志、测试和排查。
 
-### 1) 添加依赖
+关键类型：
 
-```toml
-[dependencies]
-rs-tenant = { version = "0.1", features = ["memory-store"] }
-```
+- 主体与请求：`AuthSubject`、`ScopeQuery`、`TenantAccessRequest`、`ScopedAccessRequest`
+- 范围：`ScopePath`、`GrantScope`、`AccessScope`
+- 角色：`RoleId`、`RoleAssignment`
+- 决策：`AccessDecision`、`AuthorizationSource`
+- 组装与内存实现：`EngineBuilder`、`MemorySource`、`MemoryCache`
 
-### 2) 最小授权示例
+## 快速示例
 
 ```rust
 use rs_tenant::{
-    Decision, EngineBuilder, MemoryStore, Permission, PrincipalId, RoleId, TenantId,
+    AccessDecision, AuthSubject, EngineBuilder, GrantScope, MembershipStatus, MemorySource,
+    Permission, PrincipalId, RoleId, ScopePath, ScopedAccessRequest, TenantId, TenantStatus,
 };
 
 async fn demo() -> rs_tenant::Result<()> {
-    let store = MemoryStore::new();
+    let source = MemorySource::new();
 
-    let tenant = TenantId::try_from("tenant_a")?;
-    let principal = PrincipalId::try_from_parts("employee", "user_1")?;
-    let role = RoleId::try_from("invoice_reader")?;
-    let permission = Permission::try_from("invoice:read")?;
+    let tenant = TenantId::parse("tenant_a")?;
+    let principal = PrincipalId::parse("user_1")?;
+    let subject = AuthSubject {
+        tenant: tenant.clone(),
+        principal: principal.clone(),
+    };
+    let role = RoleId::parse("store_order_reader")?;
 
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
-    store.add_principal_role(tenant.clone(), principal.clone(), role.clone());
-    store.add_role_permission(tenant.clone(), role, permission.clone());
+    source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+    source.set_membership_status(
+        tenant.clone(),
+        principal.clone(),
+        MembershipStatus::Active,
+    );
+    source.add_role_assignment(
+        tenant.clone(),
+        principal.clone(),
+        role.clone(),
+        GrantScope::paths(vec![ScopePath::parse("agent/123/store/456")?])?,
+    );
+    source.add_role_permission(tenant.clone(), role, Permission::parse("order:read")?);
 
-    let engine = EngineBuilder::new(store).build();
-    let decision = engine.authorize(tenant, principal, permission).await?;
+    let engine = EngineBuilder::new(source).enable_wildcard(true).build();
 
-    assert_eq!(decision, Decision::Allow);
+    let decision = engine
+        .can_access_scope(ScopedAccessRequest {
+            subject,
+            permission: Permission::parse("order:read")?,
+            target: ScopePath::parse("agent/123/store/456/order/789")?,
+        })
+        .await?;
+
+    assert_eq!(decision, AccessDecision::Allow);
     Ok(())
 }
 ```
 
-### 3) 本地验证
+查询列表接口优先使用 `accessible_scope`，由业务仓储把 `AccessScope` 转成 SQL、ORM 或搜索条件：
 
-```bash
-cargo test --offline --features memory-store,memory-cache
+```rust
+let scope = engine.accessible_scope(query).await?;
+
+match scope {
+    AccessScope::None => Ok(vec![]),
+    AccessScope::Tenant { tenant } => repo.list_by_tenant(tenant).await,
+    AccessScope::Paths { tenant, roots } => repo.list_by_scope_roots(tenant, roots).await,
+}
 ```
 
-## 授权语义（摘要）
+## 已删除的 v0.2 兼容层
 
-`authorize(tenant, principal, permission)` 执行顺序：
+v0.3.0 是 breaking rewrite，不保留旧概念别名或兼容 feature：
 
-1. `tenant_active(tenant)`
-2. （可选）`is_super_admin(principal)`
-3. `principal_active(tenant, principal)`
-4. 收集权限（租户角色 + 全局角色）
-5. 按配置匹配权限，返回 `Allow` 或 `Deny`
+- 删除旧 `authorize(...)`。
+- 删除旧 `scope(...)`。
+- 删除旧 `Scope`。
+- 删除 `Store` / `TenantStore` / `RoleStore` / `GlobalRoleStore` / `ScopeStore`。
+- 删除 `GlobalRoleId` / `GlobalRole`。
+- 删除 `SuperAdminMode`、`enable_super_admin(...)`、`is_super_admin(...)`。
+- 删除空的 `casbin` feature。
+- 删除公开 unchecked constructor。
 
-`scope(tenant, principal, resource)` 返回：
+租户内管理员请用普通角色表达：授予 `*:*`，并通过 `GrantScope::Tenant` 分配。平台权限、跨租户权限和运维救援能力应在应用层显式建模。
 
-- `Scope::TenantOnly { tenant }`
-- `Scope::None`
-
-`authorize_with_scope(tenant, principal, permission, target_scope)` 执行顺序：
-
-1. 先执行 `authorize` 全流程（租户、主体、角色/全局角色权限匹配）
-2. 若 `authorize = Deny`，直接返回 `Deny`
-3. 若开启 super-admin 且命中，直接返回 `Allow`
-4. 否则调用 `ScopeStore::scope_allows` 校验目标层级作用域，命中返回 `Allow`，否则 `Deny`
-
-默认 `scope_allows` 语义为“主体作用域与目标作用域相等或为其祖先路径”。
-
-超级管理员为平台级能力，但仍受 `tenant_active` 约束。
-
-## Feature 开关
-
-```toml
-[features]
-default = []
-serde = []
-memory-store = []
-memory-cache = []
-axum = []
-axum-jwt = []
-criterion-bench = []
-casbin = []
-```
-
-说明：
-
-- `axum-jwt` 依赖 `axum` 和 `serde`
-- `casbin` 当前仅保留 feature 开关，未提供公开适配 API
-
-## 生产集成建议
-
-生产环境通常按以下步骤接入：
-
-1. 设计权限数据模型（租户、主体、角色、权限、继承、全局角色、超级管理员）
-2. 实现 Store 接口：`TenantStore`、`RoleStore`、`GlobalRoleStore`（需要层级作用域控制时再实现 `ScopeStore`）
-3. 使用 `EngineBuilder` 组装引擎（继承/wildcard/super-admin/缓存）
-4. 在权限数据变更后执行缓存失效
-
-缓存失效接口：
-
-- `invalidate_principal(tenant, principal)`
-- `invalidate_role(tenant, role)`
-- `invalidate_tenant(tenant)`
-
-## Axum 集成
-
-- 启用 `axum` 或 `axum-jwt` feature
-- 在请求扩展中注入 `AuthContext { tenant, principal }`
-- 使用 `AuthorizeLayer` 为路由绑定权限
-- 使用 JWT 时可配合 `JwtAuthLayer`
-
-详细示例见 `docs/06-axum-integration.md`。
-
-## 文档目录
+## 文档
 
 完整中文文档见 `docs/`：
 
-- `docs/README.md`：文档首页
-- `docs/01-overview.md`：项目总览
-- `docs/02-domain-model.md`：领域模型与权限语义
-- `docs/03-authorization-flow.md`：授权流程详解
-- `docs/04-quickstart.md`：5 分钟接入
-- `docs/05-integration-production.md`：生产集成指南
-- `docs/06-axum-integration.md`：Axum/JWT 集成
-- `docs/07-examples.md`：典型案例
-- `docs/08-testing-benchmark.md`：测试与基准
-- `docs/09-faq-troubleshooting.md`：FAQ 与排查
-- `docs/10-rs-tenant-vs-casbin.md`：与 Casbin 的区别与选型
+- [文档首页](docs/README.md)
+- [01. 项目总览](docs/01-overview.md)
+- [02. 领域模型与权限语义](docs/02-domain-model.md)
+- [03. 授权流程详解](docs/03-authorization-flow.md)
+- [04. 5 分钟快速接入](docs/04-quickstart.md)
+- [05. 生产环境集成指南](docs/05-integration-production.md)
+- [06. Axum 与 JWT 集成](docs/06-axum-integration.md)
+- [07. 典型案例](docs/07-examples.md)
+- [08. 测试与性能基准](docs/08-testing-benchmark.md)
+- [09. FAQ 与故障排查](docs/09-faq-troubleshooting.md)
+- [10. Casbin 边界](docs/10-rs-tenant-vs-casbin.md)
+- [v0.3 重构方案](docs/redesign-v0.3.md)
 
-## 文档发布（mdBook + GitHub Pages）
-
-仓库已内置 `book.toml` 与 `.github/workflows/mdbook.yml`，文档会在 `main` 分支的文档变更后自动发布到 GitHub Pages。
-
-本地预览：
+本地预览 mdBook：
 
 ```bash
-cargo install mdbook --locked
 mdbook serve
 ```
 
-首次启用 GitHub Pages：
-
-1. 打开仓库 `Settings -> Pages`
-2. `Build and deployment` 的 `Source` 选择 `GitHub Actions`
-3. 合并并推送本次配置后，等待 `Deploy mdBook to GitHub Pages` 工作流完成
-
-## 开发与测试命令
+## 开发命令
 
 ```bash
-# 默认测试
+cargo check
 cargo test --offline
-
-# 带内存存储/缓存测试
-cargo test --offline --features memory-store,memory-cache
-
-# 手工性能测试
-cargo test --offline --features memory-store,memory-cache --test perf -- --ignored --nocapture
-
-# Criterion 基准
-cargo bench --features criterion-bench,memory-store,memory-cache
+cargo test --offline --features memory-store,memory-cache,serde
+cargo fmt --all
+cargo clippy --all-targets --all-features -D warnings
 ```
-
-## 设计边界
-
-- 本库只负责授权决策与作用域计算，不负责业务数据模型
-- 不内置数据库迁移管理
-- `MemoryStore` 主要用于测试与演示
-
-## 贡献说明
-
-欢迎提交 Issue 和 PR。提交前建议：
-
-1. 补充或更新相关测试
-2. 运行上述测试命令
-3. 若涉及性能路径，附上基准对比结果
-
-仓库贡献约定见 `AGENTS.md`。

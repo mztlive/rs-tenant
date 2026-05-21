@@ -1,13 +1,17 @@
-//! Axum integration utilities.
+//! Axum integration utilities for tenant-scoped authorization.
 
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use crate::engine::{Decision, Engine};
+use crate::cache::Cache;
+use crate::decision::AccessDecision;
+use crate::engine::Engine;
 use crate::permission::Permission;
-use crate::types::{PrincipalId, TenantId};
+use crate::request::{AuthSubject, TenantAccessRequest};
+use crate::source::AuthorizationSource;
+use crate::{PrincipalId, ScopePath, ScopedAccessRequest, TenantId};
 
 use ::axum::body::Body;
 use ::axum::http::{Request, StatusCode};
@@ -17,41 +21,42 @@ use ::tower::{Layer, Service};
 /// Authentication context extracted from a request.
 #[derive(Debug, Clone)]
 pub struct AuthContext {
-    /// Tenant identifier.
-    pub tenant: TenantId,
-    /// Principal identifier.
-    pub principal: PrincipalId,
+    /// Tenant-scoped subject.
+    pub subject: AuthSubject,
 }
 
 impl AuthContext {
-    pub(crate) fn new(tenant: TenantId, principal: PrincipalId) -> Self {
-        Self { tenant, principal }
+    /// Creates an auth context.
+    pub fn new(tenant: TenantId, principal: PrincipalId) -> Self {
+        Self {
+            subject: AuthSubject::new(tenant, principal),
+        }
     }
 }
 
-/// Middleware layer that authorizes a request using [`Engine`].
+/// Middleware layer that authorizes tenant-level requests.
 #[derive(Debug, Clone)]
-pub struct AuthorizeLayer<S, C> {
+pub struct TenantAuthorizeLayer<S, C> {
     engine: Arc<Engine<S, C>>,
     permission: Permission,
 }
 
-impl<S, C> AuthorizeLayer<S, C> {
-    /// Creates a new authorization layer.
+impl<S, C> TenantAuthorizeLayer<S, C> {
+    /// Creates a new tenant authorization layer.
     pub fn new(engine: Arc<Engine<S, C>>, permission: Permission) -> Self {
         Self { engine, permission }
     }
 }
 
-impl<S, C, Inner> Layer<Inner> for AuthorizeLayer<S, C>
+impl<S, C, Inner> Layer<Inner> for TenantAuthorizeLayer<S, C>
 where
-    S: crate::store::Store,
-    C: crate::cache::Cache,
+    S: AuthorizationSource,
+    C: Cache,
 {
-    type Service = AuthorizeService<Inner, S, C>;
+    type Service = TenantAuthorizeService<Inner, S, C>;
 
     fn layer(&self, inner: Inner) -> Self::Service {
-        AuthorizeService {
+        TenantAuthorizeService {
             inner,
             engine: self.engine.clone(),
             permission: self.permission.clone(),
@@ -59,20 +64,20 @@ where
     }
 }
 
-/// Middleware service that enforces permission checks.
+/// Middleware service that enforces tenant-level permission checks.
 #[derive(Debug, Clone)]
-pub struct AuthorizeService<Inner, S, C> {
+pub struct TenantAuthorizeService<Inner, S, C> {
     inner: Inner,
     engine: Arc<Engine<S, C>>,
     permission: Permission,
 }
 
-impl<Inner, S, C> Service<Request<Body>> for AuthorizeService<Inner, S, C>
+impl<Inner, S, C> Service<Request<Body>> for TenantAuthorizeService<Inner, S, C>
 where
     Inner: Service<Request<Body>, Response = Response> + Clone + Send + 'static,
     Inner::Future: Send + 'static,
-    S: crate::store::Store + 'static,
-    C: crate::cache::Cache + 'static,
+    S: AuthorizationSource + 'static,
+    C: Cache + 'static,
 {
     type Response = Response;
     type Error = Inner::Error;
@@ -94,18 +99,43 @@ where
             };
 
             match engine
-                .authorize_ref(&context.tenant, &context.principal, &permission)
+                .can_tenant(TenantAccessRequest {
+                    subject: context.subject,
+                    permission,
+                })
                 .await
             {
-                Ok(Decision::Allow) => {
+                Ok(AccessDecision::Allow) => {
                     poll_fn(|cx| inner.poll_ready(cx)).await?;
                     inner.call(req).await
                 }
-                Ok(Decision::Deny) => Ok((StatusCode::FORBIDDEN, "forbidden").into_response()),
+                Ok(AccessDecision::Deny) => {
+                    Ok((StatusCode::FORBIDDEN, "forbidden").into_response())
+                }
                 Err(_) => Ok((StatusCode::INTERNAL_SERVER_ERROR, "auth error").into_response()),
             }
         })
     }
+}
+
+/// Checks a scoped request with an explicit target path.
+pub async fn can_access_scope<S, C>(
+    engine: &Engine<S, C>,
+    subject: AuthSubject,
+    permission: Permission,
+    target: ScopePath,
+) -> crate::Result<AccessDecision>
+where
+    S: AuthorizationSource,
+    C: Cache,
+{
+    engine
+        .can_access_scope(ScopedAccessRequest {
+            subject,
+            permission,
+            target,
+        })
+        .await
 }
 
 #[cfg(feature = "axum-jwt")]
@@ -117,13 +147,12 @@ pub mod jwt {
     use std::sync::Arc;
     use std::task::{Context, Poll};
 
-    use async_trait::async_trait;
     use jsonwebtoken::{DecodingKey, Validation, decode};
     use serde::de::DeserializeOwned;
     use thiserror::Error;
 
     use crate::axum::AuthContext;
-    use crate::types::{PrincipalId, TenantId};
+    use crate::{PrincipalId, TenantId};
 
     use ::axum::body::Body;
     use ::axum::extract::FromRequestParts;
@@ -162,9 +191,8 @@ pub mod jwt {
 
     impl From<AuthError> for AuthRejection {
         fn from(err: AuthError) -> Self {
-            let status = StatusCode::UNAUTHORIZED;
             Self {
-                status,
+                status: StatusCode::UNAUTHORIZED,
                 message: err.to_string(),
             }
         }
@@ -259,9 +287,9 @@ pub mod jwt {
 
     impl<C: JwtClaims> JwtAuth<C> {
         fn from_claims(claims: C) -> Result<Self, AuthError> {
-            let tenant = TenantId::try_from(claims.tenant_id())
+            let tenant = TenantId::parse(claims.tenant_id())
                 .map_err(|err| AuthError::InvalidId(err.to_string()))?;
-            let principal = PrincipalId::try_from(claims.principal_id())
+            let principal = PrincipalId::parse(claims.principal_id())
                 .map_err(|err| AuthError::InvalidId(err.to_string()))?;
             Ok(Self {
                 context: AuthContext::new(tenant, principal),
@@ -270,7 +298,6 @@ pub mod jwt {
         }
     }
 
-    #[async_trait]
     impl<S, C> FromRequestParts<S> for JwtAuth<C>
     where
         S: Send + Sync + JwtAuthProvider<C>,
@@ -289,7 +316,6 @@ pub mod jwt {
         }
     }
 
-    #[async_trait]
     impl<S> FromRequestParts<S> for AuthContext
     where
         S: Send + Sync + JwtAuthProvider<DefaultClaims>,

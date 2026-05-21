@@ -2,81 +2,177 @@
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](01-overview.md) | [下一章](03-authorization-flow.md)
 
-## 核心对象
+## 租户与主体
 
-- `Tenant`：租户
-- `Principal`：主体（用户/服务账号）
-- `Role`：租户内角色
-- `GlobalRole`：平台级全局角色
-- `Permission`：权限字符串，格式 `resource:action`
-- `Decision`：`Allow` 或 `Deny`
-- `Scope`：`TenantOnly { tenant }` 或 `None`
-- `ScopePath`：层级作用域路径（例如 `agent/123/store/456`）
+```rust
+pub struct TenantId(String);
+pub struct PrincipalId(String);
 
-这些对象在库内都用强类型 ID 包装（如 `TenantId`、`PrincipalId`），减少字符串混用导致的授权错误。
+pub enum TenantStatus {
+    Active,
+    Inactive,
+}
 
-## 权限字符串规则
+pub enum MembershipStatus {
+    Active,
+    Inactive,
+}
 
-默认校验器要求：
+pub struct AuthSubject {
+    pub tenant: TenantId,
+    pub principal: PrincipalId,
+}
+```
 
-1. 必须是 `resource:action` 格式
-2. 默认会 `trim + 小写化`
-3. 不允许空段
-4. 默认字符集：`a-z`、`0-9`、`_`、`-`、`:`
+规则：
 
-示例：
+- `AuthSubject` 是 core 唯一主体上下文。
+- 所有授权请求都必须有明确 `TenantId` 和 `PrincipalId`。
+- ID 构造会 trim、校验非空、校验长度和字符集。
+- serde 反序列化必须走同一套构造校验，不能绕过领域规则。
 
-- 合法：`invoice:read`
-- 合法：`billing:export`
-- 非法：`invoice`（缺少 action）
-- 非法：`invoice:READ?`（非法字符）
+## 权限
 
-## 通配权限语义（可选）
+```rust
+pub struct Resource(String);
+pub struct Action(String);
 
-只有在 `enable_wildcard(true)` 时才生效：
+pub struct Permission {
+    resource: Resource,
+    action: Action,
+}
+```
 
-- `*:*`：任意资源任意动作
-- `invoice:*`：`invoice` 资源任意动作
-- `*:read`：任意资源的 `read`
+默认字符串格式是 `resource:action`。
 
-关闭 wildcard 时，带 `*` 的权限不会命中授权。
+规则：
 
-## 租户角色与平台角色如何合并
+- `:` 只作为 `resource` 与 `action` 的分隔符。
+- `resource` 内不再允许 `:`。
+- 资源层级使用 `/`，例如 `billing/invoice:read`。
+- 默认 normalize 为 trim + lowercase。
+- wildcard 初期只支持完整 resource/action：
+  - `*:*`
+  - `invoice:*`
+  - `*:read`
+- 不支持 `billing/*:read` 这类层级 wildcard。
 
-授权时会收集两类权限并取并集：
+推荐 API：
 
-1. 租户角色权限（来自 `RoleStore`）
-2. 全局角色权限（来自 `GlobalRoleStore`）
+```rust
+let permission = Permission::parse("billing/invoice:read")?;
+let resource = permission.resource();
+let action = permission.action();
+```
 
-只要任意一条权限命中，就 `Allow`。
+## 授权范围
 
-## 超级管理员语义
+```rust
+pub struct ScopePath(String);
 
-超级管理员是平台级能力，不按租户存储；但仍受租户启用状态约束。
+pub enum GrantScope {
+    Tenant,
+    Paths(Vec<ScopePath>),
+}
 
-生效条件：
+pub enum AccessScope {
+    None,
+    Tenant { tenant: TenantId },
+    Paths {
+        tenant: TenantId,
+        roots: Vec<ScopePath>,
+    },
+}
+```
 
-1. `EngineBuilder::enable_super_admin(true)` 已开启
-2. `Store::is_super_admin(principal)` 返回 `true`
-3. 当前租户 `tenant_active == true`
+三者含义不同：
 
-命中后会跳过普通角色权限计算，直接 `Allow`（或 `scope` 返回 `TenantOnly`）。
+- `ScopePath`：单个层级路径值对象，例如 `agent/123/store/456`。
+- `GrantScope`：一次角色分配授予的范围，必须显式给出。
+- `AccessScope`：某次权限查询合并后的最终范围。
 
-## 层级作用域语义（`ScopePath`）
+范围规则：
 
-当你需要“同一权限在不同组织层级下可见范围不同”时，可使用 `authorize_with_scope` 与 `ScopePath`。
+- `GrantScope::Tenant` 明确表示全租户范围。
+- `GrantScope::Paths` 支持多个路径根，但空 paths 无意义，构造时应拒绝。
+- `AccessScope::Tenant` 覆盖所有路径。
+- 多个 `AccessScope::Paths` 合并时会去重，并删除已被祖先路径覆盖的子路径。
+- 没有匹配授权时返回 `AccessScope::None`。
+- `ScopePath::allows(target)` 使用相等或祖先路径规则。
 
-- `ScopePath` 默认使用 `/` 分段，例如：`agent/123/store/456`
-- 默认匹配规则：主体作用域与目标作用域“相等或祖先路径”才放行
-- 该规则由 `ScopeStore::scope_allows` 提供默认实现，也可由业务自定义覆盖
+## 角色与角色分配
 
-例如主体作用域为 `agent/123`：
+```rust
+pub struct RoleId(String);
 
-- 访问 `agent/123/store/456`：允许
-- 访问 `agent/999/store/456`：拒绝
+pub struct RoleAssignment {
+    pub role: RoleId,
+    pub scope: GrantScope,
+}
+```
+
+关键语义：
+
+- 范围绑定到 role assignment。
+- 角色继承得到的父角色权限，沿用当前 assignment 的 scope。
+- `accessible_scope(permission)` 只合并权限命中的 assignments 的 scope。
+- 不再使用 membership scope 推导范围。
+
+建议同一个 role 中的权限共享同一种范围维度。如果 `invoice:read` 和 `store:manage` 需要完全不同的范围维度，应拆成不同 role。
+
+## 授权请求
+
+```rust
+pub struct ScopeQuery {
+    pub subject: AuthSubject,
+    pub permission: Permission,
+}
+
+pub struct ScopedAccessRequest {
+    pub subject: AuthSubject,
+    pub permission: Permission,
+    pub target: ScopePath,
+}
+
+pub struct TenantAccessRequest {
+    pub subject: AuthSubject,
+    pub permission: Permission,
+}
+```
+
+选择规则：
+
+- 查询列表或搜索：`ScopeQuery`。
+- 判断某个有层级归属的业务对象：`ScopedAccessRequest`。
+- 租户设置、租户级报表这类无下级目标路径操作：`TenantAccessRequest`。
+
+`ScopeQuery` 必须带完整 `Permission`，不能只带 `Resource`，避免 `read` / `delete` / `manage` 共用错误范围。
+
+## 授权结果
+
+```rust
+pub enum AccessDecision {
+    Allow,
+    Deny,
+}
+
+pub enum DenyReason {
+    TenantInactive,
+    PrincipalInactive,
+    PermissionMissing,
+    TargetScopeRequired,
+    ScopeDenied,
+}
+```
+
+主流程优先使用：
+
+- `AccessScope` 表示可访问范围。
+- `AccessDecision` 表示是否允许。
+- `DenyReason` 只用于 explain、测试和日志辅助，不建议作为业务分支的主要输入。
 
 ## 继续阅读
 
-- [上一页：01. 项目总览](01-overview.md)
-- [下一页：03. 授权流程详解](03-authorization-flow.md)
+- [上一章：01. 项目总览](01-overview.md)
+- [下一章：03. 授权流程详解](03-authorization-flow.md)
 - [返回目录](SUMMARY.md)

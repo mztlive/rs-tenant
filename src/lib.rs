@@ -1,62 +1,43 @@
-//! Multi-tenant RBAC authorization library.
+//! Tenant-scoped RBAC authorization kernel.
 //!
-//! This crate provides strong-typed identifiers, permission parsing and matching,
-//! and a pluggable async store interface. The default behavior is deny-by-default.
-//! Use [`Engine`] for authorization and [`Scope`] for resource scoping.
+//! This crate answers one core question: given a tenant, a principal, and a
+//! permission, what access scope is granted by tenant role assignments?
 //!
-//! # Examples
-//!
-//! Basic authorization flow using the in-memory store (enable `memory-store`):
-//! ```no_run
-//! use rs_tenant::{EngineBuilder, Permission, PrincipalId, TenantId};
-//! # #[cfg(feature = "memory-store")]
-//! # {
-//! use rs_tenant::MemoryStore;
-//! let store = MemoryStore::new();
-//! let engine = EngineBuilder::new(store).build();
-//! let tenant = TenantId::try_from("tenant_1").unwrap();
-//! let principal = PrincipalId::try_from_parts("employee", "user_1").unwrap();
-//! let permission = Permission::try_from("invoice:read").unwrap();
-//! let _ = engine.authorize(tenant, principal, permission);
-//! # }
-//! ```
-//!
-//! Creating a process-local cache (enable `memory-cache`):
-//! ```no_run
-//! # #[cfg(feature = "memory-cache")]
-//! # {
-//! use rs_tenant::MemoryCache;
-//! use std::time::Duration;
-//! let cache = MemoryCache::new(1024).with_ttl(Duration::from_secs(30));
-//! # let _ = cache;
-//! # }
-//! ```
+//! v0.3 is a breaking rewrite. The core API is [`Engine::accessible_scope`],
+//! [`Engine::can_access_scope`], and [`Engine::can_tenant`].
 #![forbid(unsafe_code)]
 
 mod cache;
+mod decision;
 mod engine;
 mod error;
+mod ids;
 #[cfg(feature = "memory-cache")]
 mod memory_cache;
-mod permission;
-mod store;
-mod types;
-
 #[cfg(feature = "memory-store")]
-mod memory_store;
+mod memory_source;
+mod permission;
+mod request;
+mod role;
+mod scope;
+mod source;
 
 #[cfg(feature = "axum")]
 pub mod axum;
 
-pub use crate::cache::{Cache, NoCache};
-pub use crate::engine::{Decision, Engine, EngineBuilder, Scope};
-pub use crate::error::{Error, Result, StoreError};
-pub use crate::permission::{DefaultPermissionValidator, Permission, PermissionValidator};
-pub use crate::store::{GlobalRoleStore, RoleStore, ScopeStore, Store, TenantStore};
-pub use crate::types::{GlobalRoleId, PrincipalId, ResourceName, RoleId, ScopePath, TenantId};
+pub use crate::cache::{Cache, EffectiveGrant, NoCache};
+pub use crate::decision::{AccessDecision, AccessExplanation, DenyReason};
+pub use crate::engine::{Engine, EngineBuilder, EngineConfig};
+pub use crate::error::{Error, Result, SourceError};
+pub use crate::ids::{PrincipalId, RoleId, TenantId};
+pub use crate::permission::{Action, Permission, Resource};
+pub use crate::request::{AuthSubject, ScopeQuery, ScopedAccessRequest, TenantAccessRequest};
+pub use crate::role::RoleAssignment;
+pub use crate::scope::{AccessScope, GrantScope, ScopePath, ScopeRoots};
+pub use crate::source::{AuthorizationSource, MembershipStatus, TenantStatus};
 
 #[cfg(feature = "memory-store")]
-pub use crate::memory_store::MemoryStore;
+pub use crate::memory_source::MemorySource;
 
 #[cfg(feature = "memory-cache")]
 pub use crate::memory_cache::MemoryCache;

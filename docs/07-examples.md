@@ -2,190 +2,165 @@
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](06-axum-integration.md) | [下一章](08-testing-benchmark.md)
 
-本章给出五个最常见的授权场景，便于你对照业务快速映射。
+本章用 v0.3.0 API 描述常见授权场景。
 
-## 案例 A：平台员工通过 GlobalRole 获得权限
+## 案例 A：租户级管理员
+
+租户内管理员不是特殊主体，而是普通角色：
+
+```text
+role: tenant_admin
+permission: *:*
+assignment scope: GrantScope::Tenant
+```
+
+示例：
 
 ```rust
 use rs_tenant::{
-    Decision, EngineBuilder, GlobalRoleId, MemoryStore, Permission, PrincipalId, TenantId,
+    AccessDecision, AuthSubject, EngineBuilder, GrantScope, MembershipStatus, MemorySource,
+    Permission, PrincipalId, RoleId, TenantAccessRequest, TenantId, TenantStatus,
 };
 
-async fn case_a() -> rs_tenant::Result<()> {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_a")?;
-    let principal = PrincipalId::try_from("staff_platform_1")?;
-    let global_role = GlobalRoleId::try_from("platform_billing_reader")?;
+async fn tenant_admin_can_update_settings() -> rs_tenant::Result<()> {
+    let source = MemorySource::new();
+    let tenant = TenantId::parse("tenant_a")?;
+    let principal = PrincipalId::parse("admin_1")?;
+    let subject = AuthSubject { tenant: tenant.clone(), principal };
+    let role = RoleId::parse("tenant_admin")?;
 
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
-    store.add_global_role(principal.clone(), global_role.clone());
-    store.add_global_role_permission(global_role, Permission::try_from("billing:read")?);
-
-    let engine = EngineBuilder::new(store).build();
-    let d = engine
-        .authorize(tenant, principal, Permission::try_from("billing:read")?)
-        .await?;
-    assert_eq!(d, Decision::Allow);
-    Ok(())
-}
-```
-
-## 案例 B：租户员工通过 Tenant Role 获得权限
-
-```rust
-use rs_tenant::{Decision, EngineBuilder, MemoryStore, Permission, PrincipalId, RoleId, TenantId};
-
-async fn case_b() -> rs_tenant::Result<()> {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_a")?;
-    let principal = PrincipalId::try_from("staff_tenant_1")?;
-    let role = RoleId::try_from("tenant_invoice_reader")?;
-
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
-    store.add_principal_role(tenant.clone(), principal.clone(), role.clone());
-    store.add_role_permission(tenant.clone(), role, Permission::try_from("invoice:read")?);
-
-    let engine = EngineBuilder::new(store).build();
-    let d = engine
-        .authorize(tenant, principal, Permission::try_from("invoice:read")?)
-        .await?;
-    assert_eq!(d, Decision::Allow);
-    Ok(())
-}
-```
-
-## 案例 C：平台角色 + 租户角色权限并集
-
-同一主体同时拥有租户角色与全局角色时，最终权限是两者并集，只要任意命中就放行。
-
-```rust
-use rs_tenant::{
-    Decision, EngineBuilder, GlobalRoleId, MemoryStore, Permission, PrincipalId, RoleId, TenantId,
-};
-
-async fn case_c() -> rs_tenant::Result<()> {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_a")?;
-    let principal = PrincipalId::try_from("staff_mix_1")?;
-
-    let tenant_role = RoleId::try_from("tenant_invoice_reader")?;
-    let global_role = GlobalRoleId::try_from("platform_report_exporter")?;
-
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
-
-    store.add_principal_role(tenant.clone(), principal.clone(), tenant_role.clone());
-    store.add_role_permission(
+    source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+    source.set_membership_status(
         tenant.clone(),
-        tenant_role,
-        Permission::try_from("invoice:read")?,
+        subject.principal.clone(),
+        MembershipStatus::Active,
     );
+    source.add_role_assignment(
+        tenant.clone(),
+        subject.principal.clone(),
+        role.clone(),
+        GrantScope::Tenant,
+    );
+    source.add_role_permission(tenant, role, Permission::parse("*:*")?);
 
-    store.add_global_role(principal.clone(), global_role.clone());
-    store.add_global_role_permission(global_role, Permission::try_from("report:export")?);
-
-    let engine = EngineBuilder::new(store).build();
-    let d1 = engine
-        .authorize(
-            tenant.clone(),
-            principal.clone(),
-            Permission::try_from("invoice:read")?,
-        )
+    let engine = EngineBuilder::new(source).enable_wildcard(true).build();
+    let decision = engine
+        .can_tenant(TenantAccessRequest {
+            subject,
+            permission: Permission::parse("tenant/settings:update")?,
+        })
         .await?;
-    let d2 = engine
-        .authorize(tenant, principal, Permission::try_from("report:export")?)
-        .await?;
 
-    assert_eq!(d1, Decision::Allow);
-    assert_eq!(d2, Decision::Allow);
+    assert_eq!(decision, AccessDecision::Allow);
     Ok(())
 }
 ```
 
-## 案例 D：超级管理员开关对比
+这仍然受租户状态和 membership 状态约束，不是 super admin 绕过。
 
-```rust
-use rs_tenant::{Decision, EngineBuilder, MemoryStore, Permission, PrincipalId, TenantId};
-
-async fn case_d() -> rs_tenant::Result<()> {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_a")?;
-    let principal = PrincipalId::try_from("platform_admin")?;
-
-    store.set_tenant_active(tenant.clone(), true);
-    store.add_super_admin(principal.clone());
-
-    let on = EngineBuilder::new(store.clone()).enable_super_admin(true).build();
-    let off = EngineBuilder::new(store).enable_super_admin(false).build();
-
-    let p = Permission::try_from("any_resource:any_action")?;
-    let d1 = on.authorize(tenant.clone(), principal.clone(), p.clone()).await?;
-    let d2 = off.authorize(tenant, principal, p).await?;
-
-    assert_eq!(d1, Decision::Allow);
-    assert_eq!(d2, Decision::Deny);
-    Ok(())
-}
-```
-
-## 案例 E：层级作用域授权（`authorize_with_scope`）
+## 案例 B：门店订单只读
 
 ```rust
 use rs_tenant::{
-    Decision, EngineBuilder, MemoryStore, Permission, PrincipalId, RoleId, ScopePath, TenantId,
+    AccessDecision, AuthSubject, EngineBuilder, GrantScope, MembershipStatus, MemorySource,
+    Permission, PrincipalId, RoleId, ScopePath, ScopedAccessRequest, TenantId, TenantStatus,
 };
 
-async fn case_e() -> rs_tenant::Result<()> {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_a")?;
-    let principal = PrincipalId::try_from("staff_scope_1")?;
-    let role = RoleId::try_from("invoice_reader")?;
+async fn store_reader_can_read_inside_store() -> rs_tenant::Result<()> {
+    let source = MemorySource::new();
+    let tenant = TenantId::parse("tenant_a")?;
+    let principal = PrincipalId::parse("user_1")?;
+    let subject = AuthSubject { tenant: tenant.clone(), principal };
+    let role = RoleId::parse("store_order_reader")?;
 
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
-    store.add_principal_role(tenant.clone(), principal.clone(), role.clone());
-    store.add_role_permission(tenant.clone(), role, Permission::try_from("invoice:read")?);
-    store.set_principal_scope(
+    source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+    source.set_membership_status(
         tenant.clone(),
-        principal.clone(),
-        ScopePath::try_from("agent/123")?,
+        subject.principal.clone(),
+        MembershipStatus::Active,
     );
+    source.add_role_assignment(
+        tenant.clone(),
+        subject.principal.clone(),
+        role.clone(),
+        GrantScope::paths(vec![ScopePath::parse("agent/123/store/456")?])?,
+    );
+    source.add_role_permission(tenant, role, Permission::parse("order:read")?);
 
-    let engine = EngineBuilder::new(store).build();
-    let allow = engine
-        .authorize_with_scope(
-            tenant.clone(),
-            principal.clone(),
-            Permission::try_from("invoice:read")?,
-            ScopePath::try_from("agent/123/store/456")?,
-        )
-        .await?;
-    let deny = engine
-        .authorize_with_scope(
-            tenant,
-            principal,
-            Permission::try_from("invoice:read")?,
-            ScopePath::try_from("agent/999/store/456")?,
-        )
+    let engine = EngineBuilder::new(source).build();
+    let decision = engine
+        .can_access_scope(ScopedAccessRequest {
+            subject,
+            permission: Permission::parse("order:read")?,
+            target: ScopePath::parse("agent/123/store/456/order/1")?,
+        })
         .await?;
 
-    assert_eq!(allow, Decision::Allow);
-    assert_eq!(deny, Decision::Deny);
+    assert_eq!(decision, AccessDecision::Allow);
     Ok(())
 }
 ```
 
-## 案例选择建议
+目标路径在授权 root 下方，因此允许。
 
-- 你是租户业务系统：先套用案例 B
-- 你有平台统一职能账号：加上案例 A
-- 你有紧急运维兜底账号：按案例 D 设计超级管理员
-- 你有层级组织隔离需求：加上案例 E 的 `authorize_with_scope`
+## 案例 C：同一主体拥有多个范围
+
+```rust
+use rs_tenant::{AccessScope, Permission, ScopeQuery};
+
+let scope = engine
+    .accessible_scope(ScopeQuery {
+        subject,
+        permission: Permission::parse("order:read")?,
+    })
+    .await?;
+
+match scope {
+    AccessScope::Paths { roots, .. } => {
+        // roots 已经去重，并删除被祖先覆盖的子路径
+        assert!(!roots.is_empty());
+    }
+    _ => {}
+}
+```
+
+如果多个 role assignment 都命中 `order:read`：
+
+- 任一 assignment 是 `GrantScope::Tenant`，最终就是 `AccessScope::Tenant`。
+- 全部是 `GrantScope::Paths`，最终合并为 `AccessScope::Paths`。
+- 没有命中，返回 `AccessScope::None`。
+
+## 案例 D：路径级授权不能执行租户级操作
+
+```rust
+use rs_tenant::{AccessDecision, Permission, TenantAccessRequest};
+
+let decision = engine
+    .can_tenant(TenantAccessRequest {
+        subject,
+        permission: Permission::parse("order:read")?,
+    })
+    .await?;
+
+assert_eq!(decision, AccessDecision::Deny);
+```
+
+即使主体拥有 `order:read` 的某些路径范围，只要最终不是 `AccessScope::Tenant`，`can_tenant` 就拒绝。
+
+## 案例 E：平台客服代查租户数据
+
+v0.3 core 不提供平台主体。应用层需要显式完成映射：
+
+1. 平台权限系统确认客服可以代查目标租户。
+2. 应用创建或选择一个租户内 `PrincipalId`。
+3. 在该租户下写入有时效的 membership 和 role assignment。
+4. 调用 `rs-tenant` 时只传 `AuthSubject { tenant, principal }`。
+5. 审批、原因、过期时间和审计日志由应用层维护。
+
+这样 core 仍保持租户内 RBAC，不引入跨租户绕过语义。
 
 ## 继续阅读
 
-- [上一页：06. Axum 与 JWT 集成](06-axum-integration.md)
-- [下一页：08. 测试与性能基准](08-testing-benchmark.md)
+- [上一章：06. Axum 与 JWT 集成](06-axum-integration.md)
+- [下一章：08. 测试与性能基准](08-testing-benchmark.md)
 - [返回目录](SUMMARY.md)

@@ -4,142 +4,149 @@
     feature = "memory-cache"
 ))]
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::executor::block_on;
 use rs_tenant::{
-    Decision, EngineBuilder, MemoryCache, MemoryStore, Permission, PrincipalId, ResourceName,
-    RoleId, Scope, TenantId,
+    AuthSubject, EngineBuilder, GrantScope, MembershipStatus, MemoryCache, MemorySource,
+    Permission, PrincipalId, RoleId, ScopePath, ScopedAccessRequest, TenantAccessRequest, TenantId,
+    TenantStatus,
 };
+use std::hint::black_box;
 use std::time::Duration;
 
-fn principal(account_id: &str) -> PrincipalId {
-    PrincipalId::try_from_parts("bench", account_id).expect("principal id")
+fn setup_flat_source() -> (MemorySource, AuthSubject, Permission, ScopePath) {
+    let source = MemorySource::new();
+    let tenant = TenantId::parse("tenant_bench").unwrap();
+    let principal = PrincipalId::parse("principal_bench").unwrap();
+    let role = RoleId::parse("role_reader").unwrap();
+    let permission = Permission::parse("invoice:read").unwrap();
+    let scope = ScopePath::parse("agent/1").unwrap();
+
+    source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+    source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
+    source.add_role_assignment(
+        tenant.clone(),
+        principal.clone(),
+        role.clone(),
+        GrantScope::paths(vec![scope.clone()]).unwrap(),
+    );
+    source.add_role_permission(tenant.clone(), role, permission.clone());
+
+    (
+        source,
+        AuthSubject::new(tenant, principal),
+        permission,
+        scope,
+    )
 }
 
-fn setup_flat_store() -> (MemoryStore, TenantId, PrincipalId, Permission, ResourceName) {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_bench").unwrap();
-    let principal = principal("principal_bench");
-    let role = RoleId::try_from("role_reader").unwrap();
-    let permission = Permission::try_from("invoice:read").unwrap();
-    let resource = ResourceName::try_from("invoice").unwrap();
-
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
-    store.add_principal_role(tenant.clone(), principal.clone(), role.clone());
-    store.add_role_permission(tenant.clone(), role, permission.clone());
-
-    (store, tenant, principal, permission, resource)
+fn setup_tenant_source() -> (MemorySource, AuthSubject, Permission) {
+    let (source, subject, permission, _) = setup_flat_source();
+    let role = RoleId::parse("tenant_admin").unwrap();
+    source.add_role_assignment(
+        subject.tenant.clone(),
+        subject.principal.clone(),
+        role.clone(),
+        GrantScope::tenant(),
+    );
+    source.add_role_permission(subject.tenant.clone(), role, permission.clone());
+    (source, subject, permission)
 }
 
-fn setup_hierarchy_store(depth: usize) -> (MemoryStore, TenantId, PrincipalId, Permission) {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_hierarchy_bench").unwrap();
-    let principal = principal("principal_hierarchy_bench");
-    let permission = Permission::try_from("invoice:read").unwrap();
+fn setup_hierarchy_source(depth: usize) -> (MemorySource, AuthSubject, Permission, ScopePath) {
+    let source = MemorySource::new();
+    let tenant = TenantId::parse("tenant_hierarchy_bench").unwrap();
+    let principal = PrincipalId::parse("principal_hierarchy_bench").unwrap();
+    let permission = Permission::parse("invoice:read").unwrap();
+    let scope = ScopePath::parse("agent/1").unwrap();
 
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
+    source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+    source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
 
-    let first_role = RoleId::try_from("role_chain_0").unwrap();
-    store.add_principal_role(tenant.clone(), principal.clone(), first_role);
+    let first_role = RoleId::parse("role_chain_0").unwrap();
+    source.add_role_assignment(
+        tenant.clone(),
+        principal.clone(),
+        first_role,
+        GrantScope::paths(vec![scope.clone()]).unwrap(),
+    );
 
     for i in 0..depth {
-        let current = RoleId::try_from(format!("role_chain_{i}").as_str()).unwrap();
-        let next = RoleId::try_from(format!("role_chain_{}", i + 1).as_str()).unwrap();
-        store.add_role_inherit(tenant.clone(), current, next);
+        let current = RoleId::parse(format!("role_chain_{i}").as_str()).unwrap();
+        let next = RoleId::parse(format!("role_chain_{}", i + 1).as_str()).unwrap();
+        source.add_parent_role(tenant.clone(), current, next);
     }
 
-    let tail = RoleId::try_from(format!("role_chain_{depth}").as_str()).unwrap();
-    store.add_role_permission(tenant.clone(), tail, permission.clone());
+    let tail = RoleId::parse(format!("role_chain_{depth}").as_str()).unwrap();
+    source.add_role_permission(tenant.clone(), tail, permission.clone());
 
-    (store, tenant, principal, permission)
+    (
+        source,
+        AuthSubject::new(tenant, principal),
+        permission,
+        scope,
+    )
 }
 
-fn setup_role_fanout_store(role_count: usize) -> (MemoryStore, TenantId, PrincipalId, Permission) {
-    let store = MemoryStore::new();
-    let tenant = TenantId::try_from("tenant_fanout_bench").unwrap();
-    let principal = principal("principal_fanout_bench");
+fn setup_role_fanout_source(role_count: usize) -> (MemorySource, AuthSubject, Permission) {
+    let source = MemorySource::new();
+    let tenant = TenantId::parse("tenant_fanout_bench").unwrap();
+    let principal = PrincipalId::parse("principal_fanout_bench").unwrap();
 
-    store.set_tenant_active(tenant.clone(), true);
-    store.set_principal_active(tenant.clone(), principal.clone(), true);
+    source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+    source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
 
     for i in 0..role_count {
-        let role = RoleId::try_from(format!("role_{i}").as_str()).unwrap();
-        let permission = Permission::try_from(format!("invoice_{i}:read").as_str()).unwrap();
-        store.add_principal_role(tenant.clone(), principal.clone(), role.clone());
-        store.add_role_permission(tenant.clone(), role, permission);
+        let role = RoleId::parse(format!("role_{i}").as_str()).unwrap();
+        let permission = Permission::parse(format!("invoice_{i}:read").as_str()).unwrap();
+        source.add_role_assignment(
+            tenant.clone(),
+            principal.clone(),
+            role.clone(),
+            GrantScope::tenant(),
+        );
+        source.add_role_permission(tenant.clone(), role, permission);
     }
 
-    let required =
-        Permission::try_from(format!("invoice_{}:read", role_count - 1).as_str()).unwrap();
-    (store, tenant, principal, required)
+    let required = Permission::parse(format!("invoice_{}:read", role_count - 1).as_str()).unwrap();
+    (source, AuthSubject::new(tenant, principal), required)
 }
 
 fn bench_flat(c: &mut Criterion) {
-    let mut group = c.benchmark_group("authorize_flat");
+    let mut group = c.benchmark_group("v03_flat_access");
     group.sample_size(30);
     group.throughput(Throughput::Elements(1));
 
-    let (store, tenant, principal, permission, resource) = setup_flat_store();
-    let engine = EngineBuilder::new(store).build();
-    group.bench_function("authorize_no_cache", |b| {
+    let (source, subject, permission, scope) = setup_flat_source();
+    let engine = EngineBuilder::new(source).build();
+    group.bench_function("can_access_scope_no_cache", |b| {
         b.iter(|| {
-            let decision =
-                block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
+            let decision = block_on(engine.can_access_scope(ScopedAccessRequest {
+                subject: subject.clone(),
+                permission: permission.clone(),
+                target: scope.clone(),
+            }))
+            .unwrap();
             black_box(decision);
-        });
-    });
-    group.bench_function("scope_no_cache", |b| {
-        b.iter(|| {
-            let scope = block_on(engine.scope_ref(&tenant, &principal, &resource)).unwrap();
-            black_box(scope);
         });
     });
 
-    let (store, tenant, principal, permission, resource) = setup_flat_store();
-    let cache = MemoryCache::new(8_192)
-        .with_shards(1)
-        .with_ttl(Duration::from_secs(60));
-    let engine = EngineBuilder::new(store).cache(cache).build();
-    assert_eq!(
-        block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap(),
-        Decision::Allow
-    );
-    group.bench_function("authorize_cache_single_shard", |b| {
+    let (source, subject, permission) = setup_tenant_source();
+    let engine = EngineBuilder::new(source)
+        .cache(
+            MemoryCache::new(8_192)
+                .with_shards(8)
+                .with_ttl(Duration::from_secs(60)),
+        )
+        .build();
+    group.bench_function("can_tenant_cache", |b| {
         b.iter(|| {
-            let decision =
-                block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
+            let decision = block_on(engine.can_tenant(TenantAccessRequest {
+                subject: subject.clone(),
+                permission: permission.clone(),
+            }))
+            .unwrap();
             black_box(decision);
-        });
-    });
-    group.bench_function("scope_cache_single_shard", |b| {
-        b.iter(|| {
-            let scope = block_on(engine.scope_ref(&tenant, &principal, &resource)).unwrap();
-            black_box(scope);
-        });
-    });
-
-    let (store, tenant, principal, permission, resource) = setup_flat_store();
-    let cache = MemoryCache::new(8_192)
-        .with_shards(8)
-        .with_ttl(Duration::from_secs(60));
-    let engine = EngineBuilder::new(store).cache(cache).build();
-    assert_eq!(
-        block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap(),
-        Decision::Allow
-    );
-    group.bench_function("authorize_cache_sharded", |b| {
-        b.iter(|| {
-            let decision =
-                block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
-            black_box(decision);
-        });
-    });
-    group.bench_function("scope_cache_sharded", |b| {
-        b.iter(|| {
-            let scope = block_on(engine.scope_ref(&tenant, &principal, &resource)).unwrap();
-            black_box(scope);
         });
     });
 
@@ -147,21 +154,25 @@ fn bench_flat(c: &mut Criterion) {
 }
 
 fn bench_hierarchy_depth(c: &mut Criterion) {
-    let mut group = c.benchmark_group("authorize_hierarchy_depth");
+    let mut group = c.benchmark_group("v03_hierarchy_depth");
     group.sample_size(30);
     group.throughput(Throughput::Elements(1));
 
     for depth in [1usize, 4, 8, 16] {
-        let (store, tenant, principal, permission) = setup_hierarchy_store(depth);
-        let engine = EngineBuilder::new(store)
+        let (source, subject, permission, scope) = setup_hierarchy_source(depth);
+        let engine = EngineBuilder::new(source)
             .enable_role_hierarchy(true)
-            .max_inherit_depth(depth + 2)
+            .max_role_depth(depth + 2)
             .build();
         let id = BenchmarkId::from_parameter(depth);
         group.bench_with_input(id, &depth, |b, _| {
             b.iter(|| {
-                let decision =
-                    block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap();
+                let decision = block_on(engine.can_access_scope(ScopedAccessRequest {
+                    subject: subject.clone(),
+                    permission: permission.clone(),
+                    target: scope.clone(),
+                }))
+                .unwrap();
                 black_box(decision);
             });
         });
@@ -171,19 +182,21 @@ fn bench_hierarchy_depth(c: &mut Criterion) {
 }
 
 fn bench_role_fanout(c: &mut Criterion) {
-    let mut group = c.benchmark_group("authorize_role_fanout");
+    let mut group = c.benchmark_group("v03_role_fanout");
     group.sample_size(30);
     group.throughput(Throughput::Elements(1));
 
     for role_count in [1usize, 8, 32, 128] {
-        let (store, tenant, principal, required) = setup_role_fanout_store(role_count);
-        let engine = EngineBuilder::new(store).build();
-
+        let (source, subject, permission) = setup_role_fanout_source(role_count);
+        let engine = EngineBuilder::new(source).build();
         let id = BenchmarkId::from_parameter(role_count);
         group.bench_with_input(id, &role_count, |b, _| {
             b.iter(|| {
-                let decision =
-                    block_on(engine.authorize_ref(&tenant, &principal, &required)).unwrap();
+                let decision = block_on(engine.can_tenant(TenantAccessRequest {
+                    subject: subject.clone(),
+                    permission: permission.clone(),
+                }))
+                .unwrap();
                 black_box(decision);
             });
         });
@@ -192,48 +205,10 @@ fn bench_role_fanout(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_scope(c: &mut Criterion) {
-    let mut group = c.benchmark_group("scope_behavior");
-    group.sample_size(30);
-    group.throughput(Throughput::Elements(1));
-
-    let (store, tenant, principal, permission, resource) = setup_flat_store();
-    let engine = EngineBuilder::new(store)
-        .cache(
-            MemoryCache::new(8_192)
-                .with_shards(8)
-                .with_ttl(Duration::from_secs(60)),
-        )
-        .build();
-    assert_eq!(
-        block_on(engine.authorize_ref(&tenant, &principal, &permission)).unwrap(),
-        Decision::Allow
-    );
-
-    group.bench_function("scope_allow", |b| {
-        b.iter(|| {
-            let scope = block_on(engine.scope_ref(&tenant, &principal, &resource)).unwrap();
-            black_box(scope);
-        });
-    });
-
-    let denied_resource = ResourceName::try_from("customer").unwrap();
-    group.bench_function("scope_deny", |b| {
-        b.iter(|| {
-            let scope = block_on(engine.scope_ref(&tenant, &principal, &denied_resource)).unwrap();
-            assert!(matches!(scope, Scope::None));
-            black_box(scope);
-        });
-    });
-
-    group.finish();
-}
-
 criterion_group!(
     benches,
     bench_flat,
     bench_hierarchy_depth,
-    bench_role_fanout,
-    bench_scope
+    bench_role_fanout
 );
 criterion_main!(benches);

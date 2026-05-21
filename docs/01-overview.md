@@ -4,54 +4,99 @@
 
 ## 项目定位
 
-`rs-tenant` 是一个多租户 RBAC 授权库，聚焦四件事：
+`rs-tenant` v0.3.0 是面向 Rust SaaS 系统的租户内 RBAC 授权内核。
 
-1. 在租户上下文内做授权判定：`authorize(tenant, principal, permission)`
-2. 在租户上下文内做“权限 + 目标层级作用域”联合判定：`authorize_with_scope(...)`
-3. 在资源查询前给出访问范围：`scope(tenant, principal, resource)`
-4. 通过可插拔 `Store` trait 连接你的数据库与缓存
+它的输入是：
 
-## 适用与不适用场景
+```text
+tenant + principal + permission -> access scope
+```
 
-适用：
-- SaaS 多租户系统
-- 需要“租户角色 + 平台全局角色”组合授权
-- 希望把权限决策从业务代码里抽离
+它的输出是：
 
-不适用：
-- 以复杂 ABAC 属性策略为主的系统
-- 希望库内直接管理 ORM 模型和数据库迁移
+- `AccessScope`：用于查询前过滤。
+- `AccessDecision`：用于目标路径或租户级操作的点判定。
+- `AccessExplanation`：用于排查和测试的轻量解释。
 
-## 核心设计原则
+核心不处理平台跨租户权限，不提供 super admin 绕过，也不承担用户、租户、角色的后台管理职责。
+
+## 核心能力
+
+v0.3.0 聚焦以下能力：
+
+1. 强类型租户内主体：`AuthSubject { tenant, principal }`
+2. 强类型权限：`Permission = Resource + Action`
+3. 角色分配范围：`RoleAssignment { role, scope: GrantScope }`
+4. 查询前范围计算：`Engine::accessible_scope(ScopeQuery)`
+5. 路径目标判定：`Engine::can_access_scope(ScopedAccessRequest)`
+6. 租户级判定：`Engine::can_tenant(TenantAccessRequest)`
+7. 单一授权数据源：`AuthorizationSource`
+8. 可选内存实现与缓存：`MemorySource`、`MemoryCache`
+
+## 适用场景
+
+- SaaS 系统里的租户内角色授权。
+- 门店、区域、代理、组织树等层级数据范围控制。
+- 列表接口需要先计算可见范围，再下推到数据查询。
+- 服务已有自己的身份认证和业务数据表，只需要授权内核。
+
+## 不适用场景
+
+- 平台后台自身权限。
+- 跨租户可见性计算。
+- 平台或租户 super admin 直接绕过授权。
+- Casbin matcher 这类通用策略语言。
+- ORM、数据库迁移、审计日志落库。
+
+这些能力应在应用层单独建模，或留给未来独立 feature，而不混入 v0.3 core。
+
+## 设计原则
 
 ### 1) Deny by default
-只要任一关键前置条件不满足，就直接 `Deny`，避免“漏配即放行”。
 
-### 2) 存储与引擎解耦
-引擎不关心你用 MySQL、PostgreSQL 或其他存储；你只需实现 `Store` 的异步读取能力。若你需要层级作用域授权，再额外实现 `ScopeStore`。
+任何缺省、缺失、无法解释的授权数据都拒绝：
 
-### 3) 可选能力按 feature 开启
-常用 feature：
-- `memory-store`：内存存储（测试/演示）
-- `memory-cache`：内存缓存
-- `axum`：Axum 授权中间件
-- `axum-jwt`：JWT 解析 + Axum
-- `serde`：类型序列化
+- 租户不存在或不可用：拒绝。
+- 主体不是有效租户成员：拒绝。
+- 没有角色分配：拒绝。
+- 权限未命中：拒绝。
+- 角色分配没有显式范围：拒绝。
+- `AuthorizationSource` 读取失败：返回错误，由调用方 fail closed。
 
-## 一张图理解执行边界
+### 2) 范围绑定到角色分配
 
-- 业务系统负责：身份来源、权限数据落库、数据变更触发缓存失效
-- `rs-tenant` 负责：读取权限关系、计算结果、返回 `Decision` 或 `Scope`
+同一个主体可能拥有多个权限和多个范围。例如：
 
-## 典型接入顺序
+- `invoice:read` 是全租户。
+- `order:read` 只覆盖两个门店。
+- `customer:update` 只覆盖某个区域。
 
-1. 用 `memory-store` 跑通最小授权链路
-2. 按业务表结构实现 `TenantStore` / `RoleStore` / `GlobalRoleStore`（层级作用域场景再实现 `ScopeStore`）
-3. 根据吞吐需求启用 `memory-cache`
-4. Web 框架（如 Axum）里统一接入授权中间件
+因此 v0.3 把范围绑定到 `RoleAssignment`，而不是绑定到 membership 或 principal。
+
+### 3) 避免裸权限判定误用
+
+v0.3 不提供语义含糊的裸 `can(...)`。调用方必须选择：
+
+- 查询列表：用 `accessible_scope(...)`。
+- 访问某个层级对象：用 `can_access_scope(...)`。
+- 执行租户级操作：用 `can_tenant(...)`。
+
+`can_tenant(...)` 只有在最终范围是 `AccessScope::Tenant` 时才允许，路径级授权不会被当成全租户授权。
+
+## v0.3 删除项
+
+v0.3.0 不保留以下旧 API 或兼容层：
+
+- `authorize(...)`
+- `scope(...)`
+- 旧 `Scope`
+- `Store` / `TenantStore` / `RoleStore` / `GlobalRoleStore` / `ScopeStore`
+- `GlobalRoleId` / `GlobalRole`
+- `SuperAdminMode` / `enable_super_admin(...)` / `is_super_admin(...)`
+- 空的 `casbin` feature
+- 公开 unchecked constructor
 
 ## 继续阅读
 
-- [上一页：文档首页](README.md)
-- [下一页：02. 领域模型与权限语义](02-domain-model.md)
+- [下一章：02. 领域模型与权限语义](02-domain-model.md)
 - [返回目录](SUMMARY.md)

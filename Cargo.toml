@@ -1,13 +1,13 @@
 [package]
 name = "rs-tenant"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Multi-tenant RBAC authorization engine for Rust"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/huang-jia-jiang/rs-tenant"
 homepage = "https://github.com/huang-jia-jiang/rs-tenant"
 documentation = "https://docs.rs/rs-tenant"
-readme = "README.md"
+readme = "readme.md"
 keywords = ["rbac", "multi-tenant", "authorization", "axum", "permissions"]
 categories = ["authentication", "web-programming"]
 exclude = [
@@ -32,12 +32,12 @@ criterion = { version = "0.8.2", optional = true }
 
 [dev-dependencies]
 futures = "0.3.31"
+serde_json = "1.0.149"
 
 [features]
 default = []
 serde = ["dep:serde"]
 memory-store = []
-casbin = []
 memory-cache = []
 axum = ["dep:axum", "dep:http", "dep:tower"]
 axum-jwt = ["axum", "dep:jsonwebtoken", "serde"]

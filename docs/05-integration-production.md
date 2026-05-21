@@ -2,189 +2,180 @@
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](04-quickstart.md) | [下一章](06-axum-integration.md)
 
-本章给出一套可落地的生产接入步骤。
+生产接入的核心是实现 `AuthorizationSource`，然后把 `AccessScope` 下推到业务查询。
 
-## Step 1: 设计权限数据模型
+## Step 1: 设计授权数据表
 
 推荐最小逻辑表：
 
-- `tenants(id, active)`
-- `tenant_principals(tenant_id, principal_id, active)`
-- `tenant_principal_roles(tenant_id, principal_id, role_id)`
-- `tenant_principal_scopes(tenant_id, principal_id, scope_path)`（可选：仅层级作用域授权需要）
+- `tenants(id, status)`
+- `tenant_memberships(tenant_id, principal_id, status)`
+- `tenant_role_assignments(tenant_id, principal_id, role_id, scope_kind, scope_paths)`
 - `tenant_role_permissions(tenant_id, role_id, permission)`
 - `tenant_role_inherits(tenant_id, role_id, parent_role_id)`
-- `global_principal_roles(principal_id, global_role_id)`
-- `global_role_permissions(global_role_id, permission)`
-- `platform_super_admins(principal_id)`
 
 索引建议：
-- 租户相关表统一以 `(tenant_id, ...)` 作为前导索引
-- `platform_super_admins(principal_id)` 唯一索引
 
-## Step 2: 实现 Store trait
+- 租户内表统一以 `(tenant_id, ...)` 作为前导索引。
+- membership 使用 `(tenant_id, principal_id)` 唯一索引。
+- role assignment 使用 `(tenant_id, principal_id)` 和 `(tenant_id, role_id)` 索引。
+- role permission 使用 `(tenant_id, role_id)` 索引。
 
-你需要实现三组接口：`TenantStore`、`RoleStore`、`GlobalRoleStore`。  
-如果你使用 `authorize_with_scope`，还需要实现 `ScopeStore`。
+不再需要：
+
+- 全局角色表。
+- 平台 super admin 表作为 core 输入。
+- membership scope 表。
+- Casbin policy 表作为 core 兼容层。
+
+如果应用层需要平台管理能力，请单独设计平台权限系统；进入 `rs-tenant` 前必须先明确目标租户和租户内主体。
+
+## Step 2: 实现 `AuthorizationSource`
 
 ```rust
 use async_trait::async_trait;
 use rs_tenant::{
-    GlobalRoleId, GlobalRoleStore, Permission, PrincipalId, RoleId, RoleStore, StoreError,
-    ScopePath, ScopeStore, TenantId, TenantStore,
+    AuthSubject, AuthorizationSource, MembershipStatus, Permission, RoleAssignment, RoleId,
+    SourceError, TenantId, TenantStatus,
 };
 
-pub struct DbStore {
-    // 例如：数据库连接池
+pub struct DbAuthorizationSource {
+    // 例如数据库连接池
 }
 
 #[async_trait]
-impl TenantStore for DbStore {
-    async fn tenant_active(&self, tenant: TenantId) -> Result<bool, StoreError> {
+impl AuthorizationSource for DbAuthorizationSource {
+    async fn tenant_status(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<TenantStatus, SourceError> {
         let _ = tenant;
         todo!()
     }
 
-    async fn principal_active(
+    async fn membership_status(
         &self,
-        tenant: TenantId,
-        principal: PrincipalId,
-    ) -> Result<bool, StoreError> {
-        let _ = (tenant, principal);
+        subject: &AuthSubject,
+    ) -> Result<MembershipStatus, SourceError> {
+        let _ = subject;
         todo!()
     }
-}
 
-#[async_trait]
-impl RoleStore for DbStore {
-    async fn principal_roles(
+    async fn role_assignments(
         &self,
-        tenant: TenantId,
-        principal: PrincipalId,
-    ) -> Result<Vec<RoleId>, StoreError> {
-        let _ = (tenant, principal);
+        subject: &AuthSubject,
+    ) -> Result<Vec<RoleAssignment>, SourceError> {
+        let _ = subject;
         todo!()
     }
 
     async fn role_permissions(
         &self,
-        tenant: TenantId,
-        role: RoleId,
-    ) -> Result<Vec<Permission>, StoreError> {
+        tenant: &TenantId,
+        role: &RoleId,
+    ) -> Result<Vec<Permission>, SourceError> {
         let _ = (tenant, role);
         todo!()
     }
 
-    async fn role_inherits(
+    async fn parent_roles(
         &self,
-        tenant: TenantId,
-        role: RoleId,
-    ) -> Result<Vec<RoleId>, StoreError> {
+        tenant: &TenantId,
+        role: &RoleId,
+    ) -> Result<Vec<RoleId>, SourceError> {
         let _ = (tenant, role);
-        todo!()
-    }
-}
-
-#[async_trait]
-impl GlobalRoleStore for DbStore {
-    async fn global_roles(&self, principal: PrincipalId) -> Result<Vec<GlobalRoleId>, StoreError> {
-        let _ = principal;
-        todo!()
-    }
-
-    async fn global_role_permissions(
-        &self,
-        role: GlobalRoleId,
-    ) -> Result<Vec<Permission>, StoreError> {
-        let _ = role;
-        todo!()
-    }
-
-    async fn is_super_admin(&self, principal: PrincipalId) -> Result<bool, StoreError> {
-        let _ = principal;
-        Ok(false)
-    }
-}
-
-#[async_trait]
-impl ScopeStore for DbStore {
-    async fn principal_scope_path(
-        &self,
-        tenant: TenantId,
-        principal: PrincipalId,
-    ) -> Result<Option<ScopePath>, StoreError> {
-        let _ = (tenant, principal);
-        // 例如从 tenant_principal_scopes 读取
-        Ok(None)
+        Ok(vec![])
     }
 }
 ```
+
+`AuthorizationSource` 只读取授权数据，不实现 wildcard、角色继承、范围合并、路径覆盖等规则。这些确定性规则由领域类型和 Engine 维护。
 
 ## Step 3: 构建 Engine
 
 ```rust
-use rs_tenant::{EngineBuilder, MemoryCache};
-use std::time::Duration;
+use rs_tenant::{Engine, EngineBuilder, MemoryCache};
 
-fn build_engine(store: DbStore) -> rs_tenant::Engine<DbStore, MemoryCache> {
-    EngineBuilder::new(store)
+fn build_engine(
+    source: DbAuthorizationSource,
+) -> Engine<DbAuthorizationSource, MemoryCache> {
+    EngineBuilder::new(source)
         .enable_role_hierarchy(true)
         .enable_wildcard(true)
-        .enable_super_admin(true)
-        .max_inherit_depth(16)
-        .permission_normalize(true)
-        .cache(MemoryCache::new(10_000).with_ttl(Duration::from_secs(30)))
+        .max_role_depth(16)
+        .cache(MemoryCache::new(100_000))
         .build()
 }
 ```
 
-## Step 4: 在业务服务调用授权
+默认建议：
+
+- `enable_role_hierarchy(false)`：先关闭，除非业务确实需要继承。
+- `enable_wildcard(false)`：先关闭，避免 `*:*` 过早扩散。
+- `max_role_depth(16)`：开启继承时的默认上限。
+
+## Step 4: 查询前过滤
 
 ```rust
-use rs_tenant::{Decision, Permission, PrincipalId, TenantId};
+use rs_tenant::{AccessScope, Permission, ScopeQuery};
 
-pub async fn can_read_invoice(
-    engine: &rs_tenant::Engine<DbStore, rs_tenant::MemoryCache>,
-    tenant: TenantId,
-    principal: PrincipalId,
-) -> rs_tenant::Result<bool> {
-    let p = Permission::try_from("invoice:read")?;
-    let d = engine.authorize(tenant, principal, p).await?;
-    Ok(matches!(d, Decision::Allow))
-}
-```
-
-如果需要“权限 + 层级作用域”联合判定，可改用：
-
-```rust
-use rs_tenant::ScopePath;
-
-pub async fn can_read_invoice_in_scope(
-    engine: &rs_tenant::Engine<DbStore, rs_tenant::MemoryCache>,
-    tenant: TenantId,
-    principal: PrincipalId,
-    target_scope: ScopePath,
-) -> rs_tenant::Result<bool> {
-    let p = Permission::try_from("invoice:read")?;
-    let d = engine
-        .authorize_with_scope(tenant, principal, p, target_scope)
+pub async fn list_orders(
+    engine: &Engine<DbAuthorizationSource, MemoryCache>,
+    repo: &OrderRepo,
+    subject: rs_tenant::AuthSubject,
+) -> rs_tenant::Result<Vec<Order>> {
+    let scope = engine
+        .accessible_scope(ScopeQuery {
+            subject,
+            permission: Permission::parse("order:read")?,
+        })
         .await?;
-    Ok(matches!(d, Decision::Allow))
+
+    match scope {
+        AccessScope::None => Ok(vec![]),
+        AccessScope::Tenant { tenant } => repo.list_by_tenant(tenant).await,
+        AccessScope::Paths { tenant, roots } => repo.list_by_scope_roots(tenant, roots).await,
+    }
 }
 ```
 
-## Step 5: 处理缓存失效
+## Step 5: 目标点判定
 
-权限关系更新后，按变更范围失效缓存：
+```rust
+use rs_tenant::{AccessDecision, Permission, ScopePath, ScopedAccessRequest};
 
-- 主体维度：`invalidate_principal(tenant, principal)`
-- 角色维度：`invalidate_role(tenant, role)`
-- 租户维度：`invalidate_tenant(tenant)`
+pub async fn update_order(
+    engine: &Engine<DbAuthorizationSource, MemoryCache>,
+    subject: rs_tenant::AuthSubject,
+    order_scope: ScopePath,
+) -> rs_tenant::Result<bool> {
+    let decision = engine
+        .can_access_scope(ScopedAccessRequest {
+            subject,
+            permission: Permission::parse("order:update")?,
+            target: order_scope,
+        })
+        .await?;
 
-如果你暂时没有可靠的统一失效入口，建议先禁用缓存，确认授权正确性后再启用。
+    Ok(decision == AccessDecision::Allow)
+}
+```
+
+业务对象的 `ScopePath` 应来自可信数据，例如订单所属门店、区域或组织树，不建议直接相信客户端传入的路径。
+
+## Step 6: 缓存失效
+
+权限数据变更后按影响范围失效：
+
+- membership 或 role assignment 变化：`invalidate_principal(tenant, principal)`
+- role permission 变化：`invalidate_role(tenant, role)`
+- tenant 级批量变更：`invalidate_tenant(tenant)`
+- 无法精确识别影响面：`invalidate_all()`
+
+正确性要求高于性能。如果 `invalidate_role` 无法精确找到受影响主体，必须退化为 `invalidate_tenant` 或 `invalidate_all`。
 
 ## 继续阅读
 
-- [上一页：04. 5 分钟快速接入](04-quickstart.md)
-- [下一页：06. Axum 与 JWT 集成](06-axum-integration.md)
+- [上一章：04. 5 分钟快速接入](04-quickstart.md)
+- [下一章：06. Axum 与 JWT 集成](06-axum-integration.md)
 - [返回目录](SUMMARY.md)

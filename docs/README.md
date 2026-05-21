@@ -1,52 +1,46 @@
 # rs-tenant 文档
 
-本项目是一个多租户 RBAC 授权库，核心目标是把“授权决策”与“业务存储”解耦。你可以把它当成一个可插拔的权限引擎：业务系统负责实现数据读取，`rs-tenant` 负责计算 `Allow / Deny` 和资源访问范围（`Scope`）。
+`rs-tenant` v0.3.0 是一个租户内 RBAC 授权内核。它不托管业务模型，不提供平台级绕过能力，也不实现通用策略语言；它只根据租户、主体、角色分配、权限和授权范围计算访问结果。
 
 ## 快速入口
 
-- [从项目总览开始](01-overview.md)
-- [查看完整目录](SUMMARY.md)
-- [5 分钟快速接入](04-quickstart.md)
-- [生产环境集成指南](05-integration-production.md)
-- [Axum 与 JWT 集成](06-axum-integration.md)
-- [FAQ 与故障排查](09-faq-troubleshooting.md)
-- [rs-tenant 与 Casbin 对比](10-rs-tenant-vs-casbin.md)
+- [01. 项目总览](01-overview.md)
+- [02. 领域模型与权限语义](02-domain-model.md)
+- [03. 授权流程详解](03-authorization-flow.md)
+- [04. 5 分钟快速接入](04-quickstart.md)
+- [05. 生产环境集成指南](05-integration-production.md)
+- [06. Axum 与 JWT 集成](06-axum-integration.md)
+- [07. 典型案例](07-examples.md)
+- [08. 测试与性能基准](08-testing-benchmark.md)
+- [09. FAQ 与故障排查](09-faq-troubleshooting.md)
+- [10. Casbin 边界](10-rs-tenant-vs-casbin.md)
 - [v0.3 重构方案](redesign-v0.3.md)
 
 ## 你将学到什么
 
-- 设计概念：租户角色、平台角色、超级管理员、权限字符串模型
-- 授权流程：`authorize`、`authorize_with_scope` 与 `scope` 的真实执行顺序
-- 集成方法：从内存版快速跑通，到生产自定义 `Store`，再到 Axum/JWT 中间件接入
-- 案例实践：常见授权组合与排查思路
+- 如何用 `AuthSubject` 表达租户内主体。
+- 如何用 `GrantScope` 表达角色分配授予的范围。
+- 如何用 `AccessScope` 作为查询前过滤条件。
+- 何时调用 `accessible_scope`、`can_access_scope`、`can_tenant`。
+- 如何实现 `AuthorizationSource` 接入生产数据库。
+- 如何使用 `MemorySource` 和 `MemoryCache` 做本地验证与缓存。
+- 为什么 v0.3 删除旧 `authorize/scope/Store/GlobalRole/SuperAdmin/casbin` 兼容层。
 
 ## 推荐阅读路径
 
-### 路径 A：业务开发者（优先接入）
-1. `01-overview.md`
-2. `04-quickstart.md`
-3. `06-axum-integration.md`
-4. `07-examples.md`
-5. `09-faq-troubleshooting.md`
+业务接入优先：
 
-### 路径 B：架构/平台开发者（优先设计）
-1. `01-overview.md`
-2. `02-domain-model.md`
-3. `03-authorization-flow.md`
-4. `10-rs-tenant-vs-casbin.md`
-5. `05-integration-production.md`
-6. `08-testing-benchmark.md`
-7. `09-faq-troubleshooting.md`
-8. `redesign-v0.3.md`
+1. [01. 项目总览](01-overview.md)
+2. [04. 5 分钟快速接入](04-quickstart.md)
+3. [07. 典型案例](07-examples.md)
+4. [09. FAQ 与故障排查](09-faq-troubleshooting.md)
 
-## 版本与范围说明
+架构设计优先：
 
-- 文档基于当前仓库实现编写（`0.1.x` 语义）
-- 默认策略：`Deny by default`
-- 本库不负责 ORM、迁移、业务模型托管
+1. [02. 领域模型与权限语义](02-domain-model.md)
+2. [03. 授权流程详解](03-authorization-flow.md)
+3. [05. 生产环境集成指南](05-integration-production.md)
+4. [08. 测试与性能基准](08-testing-benchmark.md)
+5. [10. Casbin 边界](10-rs-tenant-vs-casbin.md)
 
-详细目录见 `SUMMARY.md`。
-
-## 下一步
-
-- [进入第 01 章：项目总览](01-overview.md)
+完整目录见 [SUMMARY.md](SUMMARY.md)。

@@ -2,76 +2,101 @@
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](08-testing-benchmark.md) | [下一章](10-rs-tenant-vs-casbin.md)
 
-## Q1: 为什么明明配了角色还是返回 `Deny`？
+## Q1: 为什么有角色还是返回 `AccessScope::None`？
 
-优先按顺序检查：
+按顺序检查：
 
-1. `tenant_active(tenant)` 是否为 `true`
-2. `principal_active(tenant, principal)` 是否为 `true`
-3. 权限字符串是否是 `resource:action`
-4. 你请求的 `permission` 是否与角色权限完全一致（或 wildcard 可命中）
+1. `tenant_status` 是否返回 `TenantStatus::Active`。
+2. `membership_status` 是否返回 `MembershipStatus::Active`。
+3. `role_assignments` 是否返回了至少一个 assignment。
+4. assignment 是否带了显式 `GrantScope`。
+5. `role_permissions` 是否包含请求的完整 `Permission`。
+6. wildcard 是否已开启。
+7. 角色继承是否已开启，以及父角色是否能正确读取。
 
-## Q2: 我配了 `invoice:*`，为什么仍然拒绝？
+## Q2: 为什么列表接口不能只按 resource 查询范围？
 
-通常是 wildcard 未开启。请确认：
+因为不同 action 可能有不同授权范围：
 
-```rust
-let engine = EngineBuilder::new(store).enable_wildcard(true).build();
+- `order:read` 允许两个门店。
+- `order:update` 只允许一个门店。
+- `order:delete` 完全不允许。
+
+所以 `ScopeQuery` 必须带完整 `Permission`，不能只带 `Resource`。
+
+## Q3: 为什么 `can_tenant` 拒绝了路径级授权？
+
+这是 v0.3 的刻意设计。`can_tenant` 只允许 `AccessScope::Tenant`，不接受 `AccessScope::Paths`。
+
+如果操作目标是某个门店、区域、客户、订单，请使用 `can_access_scope`。如果是列表或搜索，请使用 `accessible_scope`。
+
+## Q4: 如何做租户内管理员？
+
+用普通 RBAC 表达：
+
+```text
+role: tenant_admin
+permission: *:*
+assignment scope: GrantScope::Tenant
 ```
 
-若未开启，带 `*` 的权限不会匹配。
+然后在 `EngineBuilder` 开启 wildcard。这样管理员仍然受 tenant active 和 membership active 约束。
 
-## Q3: 超级管理员为什么没有放行？
+## Q5: v0.3 为什么没有 SuperAdmin？
 
-确认三件事：
+super admin 是绕过策略，不是租户内 RBAC 基础概念。把它放进 core 会模糊平台 super admin、租户 super admin、运维救援三种不同风险面。
 
-1. `enable_super_admin(true)` 已开启
-2. `is_super_admin(principal)` 返回 `true`
-3. 当前 `tenant_active == true`
+推荐：
 
-注意：超级管理员仍受租户启用状态约束。
+- 租户内管理员：普通角色 + `GrantScope::Tenant`。
+- 运维救援：应用层显式创建临时 membership / role assignment，并记录审批与审计。
+- 平台超级管理员：应用层平台权限系统处理，未来如有需要也应是独立 feature。
 
-## Q4: 权限更新后为什么行为没变化？
+## Q6: 权限更新后为什么行为没变化？
 
-高概率是缓存未失效。权限关系变更后请调用：
+高概率是缓存未失效。按变更范围调用：
 
-- `invalidate_principal`
-- `invalidate_role`
-- `invalidate_tenant`
+- `invalidate_principal(tenant, principal)`
+- `invalidate_role(tenant, role)`
+- `invalidate_tenant(tenant)`
+- `invalidate_all()`
 
-如果你还没有可靠失效机制，建议先暂时关闭缓存。
+如果暂时没有可靠失效入口，先禁用缓存，确认授权正确性后再启用。
 
-## Q5: `401`、`403`、`500` 怎么区分？
+## Q7: `AuthorizationSource` 应该实现哪些规则？
 
-在 Axum 集成中：
+只实现数据读取：
 
-- `401`：缺少认证上下文或 JWT 无效
-- `403`：已认证但权限不足
-- `500`：授权查询过程异常（例如 Store 读取失败）
+- tenant status
+- membership status
+- role assignments
+- role permissions
+- parent roles
 
-## Q6: 如何快速定位线上授权问题？
+不要在 Source 里实现 permission match、wildcard、role 展开、scope 合并或 path allows。这些规则属于领域类型和 Engine。
 
-建议固定输出一条结构化日志（至少包含以下字段）：
+## Q8: Axum 中的 `401`、`403`、`500` 怎么区分？
 
-- `tenant`
-- `principal`
-- `permission` 或 `resource`
-- `decision`
-- `engine_flags`（wildcard/hierarchy/super-admin）
+- `401`：认证信息缺失或无效，无法构造 `AuthSubject`。
+- `403`：认证通过，但授权结果是拒绝。
+- `500`：`AuthorizationSource` 或业务数据读取异常。
 
-同时记录缓存命中与否，可快速区分“数据问题”还是“配置问题”。
+## 排查日志建议
 
-## 排查 Checklist
+至少记录：
 
-1. 看配置：feature 与 builder 开关是否符合预期  
-2. 看数据：租户/主体是否 active，角色关系是否完整  
-3. 看字符串：权限格式、大小写、空格  
-4. 看缓存：是否失效，是否命中旧数据  
-5. 看异常：Store 错误是否被正确上报
+- tenant
+- principal
+- permission
+- request kind：`scope_query` / `scoped_access` / `tenant_access`
+- decision
+- access scope
+- deny reason
+- engine config：wildcard、role hierarchy、max depth
+- cache hit / miss
 
 ## 继续阅读
 
-- [上一页：08. 测试与性能基准](08-testing-benchmark.md)
-- [下一页：10. rs-tenant 与 Casbin 对比](10-rs-tenant-vs-casbin.md)
-- [回到文档首页](README.md)
+- [上一章：08. 测试与性能基准](08-testing-benchmark.md)
+- [下一章：10. Casbin 边界](10-rs-tenant-vs-casbin.md)
 - [返回目录](SUMMARY.md)

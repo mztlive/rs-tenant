@@ -1,72 +1,201 @@
 use crate::error::{Error, Result};
-use crate::types::ResourceName;
-use std::borrow::{Borrow, Cow};
+use std::borrow::Borrow;
 use std::fmt;
 
-/// Permission string wrapper (`resource:action`).
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
-pub struct Permission(String);
+const MAX_PERMISSION_PART_LEN: usize = 128;
+
+fn normalize(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn validate_segment(value: &str, kind: &str, allow_slash: bool) -> Result<()> {
+    if value.is_empty() {
+        return Err(Error::InvalidPermission(format!(
+            "{kind} must not be empty"
+        )));
+    }
+    if value.len() > MAX_PERMISSION_PART_LEN {
+        return Err(Error::InvalidPermission(format!(
+            "{kind} length must be <= {MAX_PERMISSION_PART_LEN}"
+        )));
+    }
+    if value == "*" {
+        return Ok(());
+    }
+    for segment in value.split('/') {
+        if segment.is_empty() {
+            return Err(Error::InvalidPermission(format!(
+                "{kind} contains empty segment"
+            )));
+        }
+        if !allow_slash && segment != value {
+            return Err(Error::InvalidPermission(format!(
+                "{kind} must not contain '/'"
+            )));
+        }
+        if !segment
+            .chars()
+            .all(|ch| matches!(ch, 'a'..='z' | '0'..='9' | '_' | '-'))
+        {
+            return Err(Error::InvalidPermission(format!(
+                "{kind} contains invalid characters"
+            )));
+        }
+    }
+    Ok(())
+}
+
+macro_rules! define_permission_part {
+    ($(#[$doc:meta])* $name:ident, $kind:expr, $allow_slash:expr) => {
+        $(#[$doc])*
+        #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+        pub struct $name(String);
+
+        impl $name {
+            /// Parses, normalizes, and validates the value.
+            pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+                let normalized = normalize(value.as_ref());
+                validate_segment(&normalized, $kind, $allow_slash)?;
+                Ok(Self(normalized))
+            }
+
+            /// Returns the normalized value.
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            /// Returns whether this part is a complete wildcard.
+            pub fn is_wildcard(&self) -> bool {
+                self.0 == "*"
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl Borrow<str> for $name {
+            fn borrow(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl TryFrom<&str> for $name {
+            type Error = Error;
+
+            fn try_from(value: &str) -> Result<Self> {
+                Self::parse(value)
+            }
+        }
+
+        #[cfg(feature = "serde")]
+        impl serde::Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        #[cfg(feature = "serde")]
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::parse(value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+define_permission_part!(
+    /// Permission resource, for example `billing/invoice`.
+    Resource,
+    "resource",
+    true
+);
+define_permission_part!(
+    /// Permission action, for example `read`.
+    Action,
+    "action",
+    false
+);
+
+/// A normalized `resource:action` permission.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct Permission {
+    resource: Resource,
+    action: Action,
+}
 
 impl Permission {
-    /// Parses and validates a permission using the default validator.
-    ///
-    /// This trims whitespace and normalizes to lowercase.
-    pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        Self::new_with(value, &DefaultPermissionValidator, true)
+    /// Creates a permission from validated parts.
+    pub fn new(resource: Resource, action: Action) -> Self {
+        Self { resource, action }
     }
 
-    /// Parses and validates a permission with a custom validator.
-    ///
-    /// When `normalize` is true, the value is trimmed and lowercased
-    /// before validation.
-    pub fn new_with(
-        value: impl AsRef<str>,
-        validator: &dyn PermissionValidator,
-        normalize: bool,
-    ) -> Result<Self> {
-        let trimmed = value.as_ref().trim();
-        if trimmed.is_empty() {
+    /// Parses a `resource:action` string.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+        let normalized = normalize(value.as_ref());
+        let mut parts = normalized.split(':');
+        let resource = parts.next().unwrap_or_default();
+        let action = parts.next().ok_or_else(|| {
+            Error::InvalidPermission("permission must be in resource:action format".to_string())
+        })?;
+        if parts.next().is_some() {
             return Err(Error::InvalidPermission(
-                "permission must not be empty".to_string(),
+                "permission must contain exactly one ':' separator".to_string(),
             ));
         }
-        let normalized = if normalize {
-            trimmed.to_ascii_lowercase()
-        } else {
-            trimmed.to_string()
-        };
-        validator.validate(&normalized)?;
-        Ok(Self(normalized))
+        Ok(Self::new(
+            Resource::parse(resource)?,
+            Action::parse(action)?,
+        ))
     }
 
-    /// Creates a permission from a trusted string without validation.
-    pub fn from_string(value: String) -> Self {
-        Self(value)
+    /// Returns the resource part.
+    pub fn resource(&self) -> &Resource {
+        &self.resource
     }
 
-    /// Returns the underlying string slice.
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// Returns the action part.
+    pub fn action(&self) -> &Action {
+        &self.action
+    }
+
+    /// Returns whether this permission contains any wildcard part.
+    pub fn has_wildcard(&self) -> bool {
+        self.resource.is_wildcard() || self.action.is_wildcard()
+    }
+
+    /// Returns whether this granted permission covers `required`.
+    pub fn matches(&self, required: &Permission, enable_wildcard: bool) -> bool {
+        if !enable_wildcard && self.has_wildcard() {
+            return false;
+        }
+        if !enable_wildcard {
+            return self == required;
+        }
+        let resource_matches = self.resource.is_wildcard() || self.resource == required.resource;
+        let action_matches = self.action.is_wildcard() || self.action == required.action;
+        resource_matches && action_matches
     }
 }
 
 impl fmt::Display for Permission {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for Permission {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Borrow<str> for Permission {
-    fn borrow(&self) -> &str {
-        &self.0
+        write!(f, "{}:{}", self.resource, self.action)
     }
 }
 
@@ -74,169 +203,68 @@ impl TryFrom<&str> for Permission {
     type Error = Error;
 
     fn try_from(value: &str) -> Result<Self> {
-        Self::new(value)
+        Self::parse(value)
     }
 }
 
-impl From<String> for Permission {
-    fn from(value: String) -> Self {
-        Self::from_string(value)
+#[cfg(feature = "serde")]
+impl serde::Serialize for Permission {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
     }
 }
 
-/// Permission validator interface for custom rules.
-pub trait PermissionValidator: Send + Sync {
-    /// Validates a normalized permission string.
-    fn validate(&self, value: &str) -> Result<()>;
-}
-
-/// Default strict permission validator.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DefaultPermissionValidator;
-
-impl PermissionValidator for DefaultPermissionValidator {
-    fn validate(&self, value: &str) -> Result<()> {
-        let (resource, action) = split_permission(value).ok_or_else(|| {
-            Error::InvalidPermission("permission must be in resource:action format".to_string())
-        })?;
-        if resource.is_empty() || action.is_empty() {
-            return Err(Error::InvalidPermission(
-                "permission must not have empty segments".to_string(),
-            ));
-        }
-        for segment in resource.split(':') {
-            if !is_valid_segment(segment) {
-                return Err(Error::InvalidPermission(
-                    "resource segment contains invalid characters".to_string(),
-                ));
-            }
-        }
-        if !is_valid_segment(action) {
-            return Err(Error::InvalidPermission(
-                "action segment contains invalid characters".to_string(),
-            ));
-        }
-        Ok(())
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Permission {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
     }
-}
-
-fn is_valid_segment(segment: &str) -> bool {
-    if segment == "*" {
-        return true;
-    }
-    if segment.is_empty() {
-        return false;
-    }
-    segment
-        .chars()
-        .all(|ch| matches!(ch, 'a'..='z' | '0'..='9' | '_' | '-'))
-}
-
-pub(crate) fn split_permission(value: &str) -> Option<(&str, &str)> {
-    value.rsplit_once(':')
-}
-
-fn normalize_for_match<'a>(value: &'a str, normalize: bool) -> Cow<'a, str> {
-    if normalize {
-        Cow::Owned(value.to_ascii_lowercase())
-    } else {
-        Cow::Borrowed(value)
-    }
-}
-
-fn has_wildcard_segment(resource: &str, action: &str) -> bool {
-    action == "*" || resource.split(':').any(|segment| segment == "*")
-}
-
-pub(crate) fn permission_matches(
-    granted: &Permission,
-    required: &Permission,
-    enable_wildcard: bool,
-    normalize: bool,
-) -> bool {
-    let Some((g_res_raw, g_act_raw)) = split_permission(granted.as_str()) else {
-        return false;
-    };
-    let Some((r_res_raw, r_act_raw)) = split_permission(required.as_str()) else {
-        return false;
-    };
-    if !enable_wildcard && has_wildcard_segment(g_res_raw, g_act_raw) {
-        return false;
-    }
-    let g_res = normalize_for_match(g_res_raw, normalize);
-    let g_act = normalize_for_match(g_act_raw, normalize);
-    let r_res = normalize_for_match(r_res_raw, normalize);
-    let r_act = normalize_for_match(r_act_raw, normalize);
-
-    if !enable_wildcard {
-        return g_res == r_res && g_act == r_act;
-    }
-
-    if g_res == "*" && g_act == "*" {
-        return true;
-    }
-    if g_res == "*" && g_act == r_act {
-        return true;
-    }
-    if g_act == "*" && g_res == r_res {
-        return true;
-    }
-    g_res == r_res && g_act == r_act
-}
-
-pub(crate) fn resource_matches(
-    granted: &Permission,
-    resource: &ResourceName,
-    enable_wildcard: bool,
-    normalize: bool,
-) -> bool {
-    let Some((g_res_raw, g_act_raw)) = split_permission(granted.as_str()) else {
-        return false;
-    };
-    if !enable_wildcard && has_wildcard_segment(g_res_raw, g_act_raw) {
-        return false;
-    }
-    let g_res = normalize_for_match(g_res_raw, normalize);
-    let resource = normalize_for_match(resource.as_str(), normalize);
-
-    if !enable_wildcard {
-        return g_res == resource;
-    }
-    if g_res == "*" {
-        return true;
-    }
-    g_res == resource
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Permission, Resource};
+    use crate::Error;
 
     #[test]
-    fn try_from_should_trim_and_lowercase() {
-        let permission = Permission::try_from(" Invoice:Read ").unwrap();
-        assert_eq!(permission.as_str(), "invoice:read");
+    fn permission_should_trim_and_lowercase() {
+        let permission = Permission::parse(" Billing/Invoice:Read ").expect("permission");
+        assert_eq!(permission.to_string(), "billing/invoice:read");
     }
 
     #[test]
-    fn try_from_should_reject_empty_segments() {
-        let result = Permission::try_from(":read");
-        assert!(matches!(result, Err(Error::InvalidPermission(_))));
+    fn permission_should_reject_resource_colon() {
+        let err = Permission::parse("billing:invoice:read").expect_err("must reject");
+        assert!(matches!(err, Error::InvalidPermission(_)));
     }
 
     #[test]
-    fn resource_match_should_ignore_wildcard_permission_when_disabled() {
-        let granted = Permission::try_from("invoice:*").unwrap();
-        let resource = ResourceName::try_from("invoice").unwrap();
+    fn wildcard_should_match_only_when_enabled() {
+        let granted = Permission::parse("invoice:*").expect("permission");
+        let required = Permission::parse("invoice:read").expect("permission");
 
-        assert!(!resource_matches(&granted, &resource, false, true));
+        assert!(!granted.matches(&required, false));
+        assert!(granted.matches(&required, true));
     }
 
     #[test]
-    fn permission_match_should_ignore_wildcard_permission_when_disabled() {
-        let granted = Permission::try_from("invoice:*").unwrap();
-        let required = Permission::try_from("invoice:*").unwrap();
+    fn resource_should_not_support_partial_wildcard() {
+        let err = Resource::parse("billing/*").expect_err("must reject");
+        assert!(matches!(err, Error::InvalidPermission(_)));
+    }
 
-        assert!(!permission_matches(&granted, &required, false, true));
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_should_validate_permission() {
+        let err = serde_json::from_str::<Permission>("\"billing:invoice:read\"")
+            .expect_err("must reject");
+        assert!(err.to_string().contains("exactly one"));
     }
 }

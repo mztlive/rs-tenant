@@ -2,91 +2,120 @@
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](05-integration-production.md) | [下一章](07-examples.md)
 
-本章给出两种接入方式：
+v0.3.0 的 Web 集成只基于租户内上下文：从请求中得到 `AuthSubject`，再调用 `can_tenant`、`can_access_scope` 或 `accessible_scope`。
 
-1. 你已有鉴权体系：手动注入 `AuthContext`
-2. 使用库内 JWT 中间件：`JwtAuthLayer`
+## 集成边界
 
-## 1) 启用 feature
+Web 层可以负责：
 
-```toml
-[dependencies]
-rs-tenant = { version = "0.1", features = ["axum"] }
-# 如果要用内置 JWT 解析：
-# rs-tenant = { version = "0.1", features = ["axum-jwt"] }
-```
+- 从请求扩展、Session、JWT 或网关注入信息中提取 `tenant id`。
+- 提取 `principal id`。
+- 构造 `AuthSubject`。
+- 在路由上调用租户级授权或范围级 helper。
 
-## 2) 手动注入 AuthContext（不使用内置 JWT）
+Web 层不应该自动推断：
 
-你可以在自定义中间件中把租户与主体写入请求扩展：
+- 平台身份如何映射为租户内主体。
+- super admin 是否绕过 membership。
+- 业务对象的 `ScopePath`。
+
+不同业务的目标路径通常来自数据库关系，而不是 URL 字符串本身。
+
+## 手动注入 `AuthSubject`
 
 ```rust
-use axum::{middleware::Next, response::Response, http::Request, body::Body};
-use rs_tenant::axum::AuthContext;
-use rs_tenant::{PrincipalId, TenantId};
+use axum::{body::Body, http::Request, middleware::Next, response::Response};
+use rs_tenant::{AuthSubject, PrincipalId, TenantId};
 
-async fn inject_auth_context(mut req: Request<Body>, next: Next) -> Response {
-    // 示例：真实项目中从网关头、Session 或外部鉴权服务读取
-    let tenant = TenantId::try_from("tenant_a").unwrap();
-    let principal = PrincipalId::try_from("user_1").unwrap();
-    req.extensions_mut().insert(AuthContext { tenant, principal });
+async fn inject_subject(mut req: Request<Body>, next: Next) -> Response {
+    let tenant = TenantId::parse("tenant_a").expect("valid tenant");
+    let principal = PrincipalId::parse("user_1").expect("valid principal");
+
+    req.extensions_mut().insert(AuthSubject { tenant, principal });
     next.run(req).await
 }
 ```
 
-路由上挂授权层：
+## 租户级路由
+
+租户设置、租户级报表等无下级目标路径的接口，可以调用 `can_tenant`。
 
 ```rust
-use rs_tenant::axum::AuthorizeLayer;
-use rs_tenant::Permission;
-use std::sync::Arc;
+use axum::{extract::Extension, http::StatusCode};
+use rs_tenant::{AccessDecision, AuthSubject, Permission, TenantAccessRequest};
 
-let permission = Permission::try_from("invoice:read").unwrap();
-let app = app.layer(AuthorizeLayer::new(Arc::clone(&engine), permission));
+async fn update_tenant_settings(
+    Extension(subject): Extension<AuthSubject>,
+    Extension(engine): Extension<AppEngine>,
+) -> Result<StatusCode, StatusCode> {
+    let decision = engine
+        .can_tenant(TenantAccessRequest {
+            subject,
+            permission: Permission::parse("tenant/settings:update")
+                .map_err(|_| StatusCode::BAD_REQUEST)?,
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match decision {
+        AccessDecision::Allow => Ok(StatusCode::NO_CONTENT),
+        AccessDecision::Deny => Err(StatusCode::FORBIDDEN),
+    }
+}
 ```
 
-## 3) 使用 JwtAuthLayer（`axum-jwt`）
+## 范围级路由
+
+访问具体订单、客户、门店等资源时，应先从业务数据中得到目标 `ScopePath`，再调用 `can_access_scope`。
 
 ```rust
-use jsonwebtoken::{DecodingKey, Validation, Algorithm};
-use rs_tenant::axum::jwt::{DefaultClaims, JwtAuthLayer, JwtAuthState};
-use rs_tenant::axum::AuthorizeLayer;
-use rs_tenant::Permission;
-use std::sync::Arc;
+use rs_tenant::{AccessDecision, Permission, ScopedAccessRequest};
 
-let mut validation = Validation::new(Algorithm::HS256);
-validation.validate_exp = true;
+async fn read_order(
+    Extension(subject): Extension<AuthSubject>,
+    Extension(engine): Extension<AppEngine>,
+    order_id: OrderId,
+) -> Result<Order, StatusCode> {
+    let order = load_order(order_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let target = order.scope_path();
 
-let jwt_state = JwtAuthState::<DefaultClaims>::new(
-    DecodingKey::from_secret(b"your-secret"),
-    validation,
-);
+    let decision = engine
+        .can_access_scope(ScopedAccessRequest {
+            subject,
+            permission: Permission::parse("order:read").map_err(|_| StatusCode::BAD_REQUEST)?,
+            target,
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-let app = app
-    .layer(AuthorizeLayer::new(
-        Arc::clone(&engine),
-        Permission::try_from("invoice:read").unwrap(),
-    ))
-    .layer(JwtAuthLayer::new(jwt_state));
+    if decision == AccessDecision::Deny {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(order)
+}
 ```
 
-中间件顺序建议与上面一致：先声明 `AuthorizeLayer`，再声明 `JwtAuthLayer`，以保证请求进入时先完成 JWT 解码并注入 `AuthContext`。
+## JWT 集成
 
-## 4) 常见返回码说明
+JWT 解析层只应提取：
 
-- `401 Unauthorized`：缺少或无效的认证上下文/JWT
-- `403 Forbidden`：认证通过但无权限
-- `500 Internal Server Error`：授权查询过程异常（如 Store 报错）
+- `tenant id`
+- `principal id`
 
-## 5) 调试建议
+解析后写入 `AuthSubject`。JWT 不负责生成平台授权，不负责解释 super admin，也不负责替业务对象推导范围。
 
-1. 先确认请求里是否有有效 `AuthContext`
-2. 打印 `tenant/principal/permission` 三元组
-3. 校验 feature 是否正确开启（`axum` / `axum-jwt`）
-4. 对照第 03 章逐步排查短路点
+## 状态码建议
+
+- `401 Unauthorized`：没有认证信息，或 JWT 无效。
+- `403 Forbidden`：认证通过，但 `rs-tenant` 返回拒绝。
+- `404 Not Found`：业务对象不存在；是否隐藏存在性由应用策略决定。
+- `500 Internal Server Error`：`AuthorizationSource` 或业务数据读取异常。
 
 ## 继续阅读
 
-- [上一页：05. 生产环境集成指南](05-integration-production.md)
-- [下一页：07. 典型案例](07-examples.md)
+- [上一章：05. 生产环境集成指南](05-integration-production.md)
+- [下一章：07. 典型案例](07-examples.md)
 - [返回目录](SUMMARY.md)
