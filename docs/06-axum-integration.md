@@ -1,54 +1,51 @@
-# 06. Axum 与 JWT 集成
+# 06. 接入 Axum 和 JWT
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](05-integration-production.md) | [下一章](07-examples.md)
 
-租户内 Web 集成基于租户内上下文：从请求中得到 `AuthSubject`，再调用 `can_tenant`、`can_access_scope` 或 `accessible_scope`。启用 v0.4.0 `platform` feature 时，平台后台应单独提取 `PlatformSubject`，再调用 `PlatformEngine`。
+Web 集成的关键是分清认证和授权：
 
-## 集成边界
+- 认证层解析请求，构造 `AuthSubject` 或 `PlatformSubject`。
+- 授权层调用 `Engine` 或 `PlatformEngine`。
+- 业务层负责加载目标对象，并把授权范围下推到查询。
 
-Web 层可以负责：
+## 启用 feature
 
-- 从请求扩展、Session、JWT 或网关注入信息中提取 `tenant id`。
-- 提取 `principal id`。
-- 构造 `AuthSubject`。
-- 在路由上调用租户级授权或范围级 helper。
+```toml
+[dependencies]
+rs-tenant = { version = "0.4.0", features = ["axum"] }
+```
 
-内置 `TenantAuthorizeLayer` 会优先读取 request extension 里的 `AuthContext`，也接受直接注入的 `AuthSubject`。`axum-jwt` 中间件会同时写入这两个 extension，方便业务 handler 用 `Extension<AuthSubject>`。
+如果需要内置 JWT 解析层：
 
-启用 `axum + platform` feature 时，内置 `PlatformAuthorizeLayer` 会优先读取 request extension 里的 `PlatformAuthContext`，也接受直接注入的 `PlatformSubject`。它只调用 `PlatformEngine::can_platform`，用于平台自身资源路由；跨租户列表、导出和路径对象访问仍应在 handler 中调用 `accessible_tenants`、`can_access_tenant` 或 `can_access_tenant_scope`，再把结果下推到业务查询。
+```toml
+[dependencies]
+rs-tenant = { version = "0.4.0", features = ["axum-jwt"] }
+```
 
-Web 层不应该自动推断：
-
-- super admin 是否绕过 membership。
-- 业务对象的 `ScopePath`。
-
-不同业务的目标路径通常来自数据库关系，而不是 URL 字符串本身。
-
-平台路由不应该复用租户内 `TenantAuthorizeLayer` 来表达平台权限。平台身份应构造 `PlatformSubject`，并根据场景调用：
-
-- `can_platform`：平台自身资源。
-- `accessible_tenants`：跨租户列表或导出。
-- `can_access_tenant`：指定租户级平台操作。
-- `can_access_tenant_scope`：指定租户路径对象。
+`axum-jwt` 会启用 `axum` 和 `serde`。
 
 ## 手动注入 `AuthSubject`
+
+你可以从 Session、JWT、网关注入头或自定义认证中间件里得到租户和主体，然后写入 request extensions。
 
 ```rust
 use axum::{body::Body, http::Request, middleware::Next, response::Response};
 use rs_tenant::{AuthSubject, PrincipalId, TenantId};
 
 async fn inject_subject(mut req: Request<Body>, next: Next) -> Response {
-    let tenant = TenantId::parse("tenant_a").expect("valid tenant");
-    let principal = PrincipalId::parse("user_1").expect("valid principal");
+    let tenant = TenantId::parse("tenant_a").expect("valid tenant id");
+    let principal = PrincipalId::parse("user_1").expect("valid principal id");
 
-    req.extensions_mut().insert(AuthSubject { tenant, principal });
+    req.extensions_mut()
+        .insert(AuthSubject::new(tenant, principal));
+
     next.run(req).await
 }
 ```
 
 ## 租户级路由
 
-租户设置、租户级报表等无下级目标路径的接口，可以调用 `can_tenant`。
+租户设置、租户级配置、租户级报表等操作可以用 `can_tenant`。
 
 ```rust
 use axum::{extract::Extension, http::StatusCode};
@@ -74,9 +71,97 @@ async fn update_tenant_settings(
 }
 ```
 
-## 平台自身资源路由
+## 对象级路由
 
-平台角色管理、平台权限配置、租户创建入口等平台自身资源，可以在请求扩展中写入 `PlatformSubject` 或 `PlatformAuthContext`，再使用 `PlatformAuthorizeLayer`：
+对象级接口要先加载对象，再用对象真实路径判断。
+
+```rust
+use axum::{extract::Extension, http::StatusCode};
+use rs_tenant::{AccessDecision, AuthSubject, Permission, ScopedAccessRequest};
+
+async fn read_order(
+    Extension(subject): Extension<AuthSubject>,
+    Extension(engine): Extension<AppEngine>,
+    order_id: OrderId,
+) -> Result<Order, StatusCode> {
+    let order = load_order(order_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let decision = engine
+        .can_access_scope(ScopedAccessRequest {
+            subject,
+            permission: Permission::parse("order:read").map_err(|_| StatusCode::BAD_REQUEST)?,
+            target: order.scope_path(),
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if decision == AccessDecision::Deny {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(order)
+}
+```
+
+不要让客户端传 `scope_path` 来完成授权判断。
+
+## 使用内置租户授权 Layer
+
+`TenantAuthorizeLayer` 适合那些只需要租户级权限的路由。它从 request extensions 读取 `AuthSubject` 或 `AuthContext`。
+
+```rust
+use std::sync::Arc;
+
+use axum::{Router, routing::post};
+use rs_tenant::{Permission, axum::TenantAuthorizeLayer};
+
+fn routes(engine: Arc<AppEngine>) -> Router {
+    Router::new().route(
+        "/tenant/settings",
+        post(update_tenant_settings).layer(TenantAuthorizeLayer::new(
+            engine,
+            Permission::parse("tenant/settings:update").expect("valid permission"),
+        )),
+    )
+}
+```
+
+访问具体业务对象时，通常仍建议在 handler 中调用 `can_access_scope`，因为 handler 才能加载对象的真实路径。
+
+## JWT 集成
+
+`axum-jwt` 提供默认 claims 和 layer。默认 claims 会提取租户主体上下文并写入 extensions。
+
+```rust
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use rs_tenant::axum::jwt::{DefaultClaims, JwtAuthLayer, JwtAuthState};
+
+let validation = Validation::new(Algorithm::HS256);
+let state = JwtAuthState::<DefaultClaims>::new(
+    DecodingKey::from_secret(b"replace-with-application-secret"),
+    validation,
+);
+let layer = JwtAuthLayer::new(state);
+```
+
+如果你的 JWT 字段不同，实现自定义 claims/provider，把结果转换成 `AuthSubject`。
+
+## HTTP 状态码建议
+
+| 情况 | 状态码 |
+|---|---|
+| 没有认证信息或 token 无效 | `401 Unauthorized` |
+| 认证通过但授权拒绝 | `403 Forbidden` |
+| 业务对象不存在 | `404 Not Found` |
+| 数据源或业务读取异常 | `500 Internal Server Error` |
+
+不要把 `AuthorizationSource` 错误映射成 403。那是系统错误，不是用户没有权限。
+
+## 平台路由
+
+启用 `axum + platform` 后，可以使用 `PlatformAuthorizeLayer` 保护平台自身资源。
 
 ```rust
 use std::sync::Arc;
@@ -85,7 +170,7 @@ use axum::{Router, routing::post};
 use rs_tenant::{
     Permission,
     axum::PlatformAuthorizeLayer,
-    platform::{PlatformEngine, PlatformAuthorizationSource},
+    platform::{PlatformAuthorizationSource, PlatformEngine},
 };
 
 fn platform_routes<S>(engine: Arc<PlatformEngine<S>>) -> Router
@@ -102,84 +187,4 @@ where
 }
 ```
 
-认证层可以从平台登录态、网关注入头或平台 JWT 中解析平台 principal，并写入：
-
-```rust
-use axum::{body::Body, http::Request, middleware::Next, response::Response};
-use rs_tenant::{
-    axum::PlatformAuthContext,
-    platform::{PlatformPrincipalId, PlatformSubject},
-};
-
-async fn inject_platform_subject(mut req: Request<Body>, next: Next) -> Response {
-    let principal = PlatformPrincipalId::parse("platform_admin").expect("valid principal");
-
-    req.extensions_mut()
-        .insert(PlatformAuthContext::new(principal.clone()));
-    req.extensions_mut()
-        .insert(PlatformSubject::new(principal));
-
-    next.run(req).await
-}
-```
-
-这个 layer 不用于租户数据范围过滤。平台查询租户列表、导出租户数据或读取租户路径对象时，应在 handler 中拿到 `TenantDataAccessScope` 后再组合 SQL、ORM 或搜索条件。
-
-## 范围级路由
-
-访问具体订单、客户、门店等资源时，应先从业务数据中得到目标 `ScopePath`，再调用 `can_access_scope`。
-
-```rust
-use rs_tenant::{AccessDecision, Permission, ScopedAccessRequest};
-
-async fn read_order(
-    Extension(subject): Extension<AuthSubject>,
-    Extension(engine): Extension<AppEngine>,
-    order_id: OrderId,
-) -> Result<Order, StatusCode> {
-    let order = load_order(order_id)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    let target = order.scope_path();
-
-    let decision = engine
-        .can_access_scope(ScopedAccessRequest {
-            subject,
-            permission: Permission::parse("order:read").map_err(|_| StatusCode::BAD_REQUEST)?,
-            target,
-        })
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if decision == AccessDecision::Deny {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    Ok(order)
-}
-```
-
-## JWT 集成
-
-JWT 解析层只应提取：
-
-- `tenant id`
-- `principal id`
-
-租户内路由解析后写入 `AuthSubject`。平台路由可以从平台登录态或 JWT 中提取平台 principal，并构造 `PlatformSubject`。
-
-JWT 不负责生成平台授权，不负责解释 super admin，也不负责替业务对象推导范围。
-
-## 状态码建议
-
-- `401 Unauthorized`：没有认证信息，或 JWT 无效。
-- `403 Forbidden`：认证通过，但 `rs-tenant` 返回拒绝。
-- `404 Not Found`：业务对象不存在；是否隐藏存在性由应用策略决定。
-- `500 Internal Server Error`：`AuthorizationSource` 或业务数据读取异常。
-
-## 继续阅读
-
-- [上一章：05. 生产环境集成指南](05-integration-production.md)
-- [下一章：07. 典型案例](07-examples.md)
-- [11. 平台授权](11-platform-authorization.md)
-- [返回目录](SUMMARY.md)
+这个 layer 只调用 `can_platform`，适合平台角色管理、平台权限配置、租户创建入口等平台自身资源。跨租户列表和导出仍应在 handler 中调用 `accessible_tenants`，再把结果下推到查询。

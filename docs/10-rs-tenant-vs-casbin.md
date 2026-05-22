@@ -1,79 +1,71 @@
-# 10. Casbin 边界
+# 10. 和 Casbin 怎么取舍
 
-> 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](09-faq-troubleshooting.md)
+> 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](09-faq-troubleshooting.md) | [下一章](11-platform-authorization.md)
 
-v0.3.0 删除空的 `casbin` feature。v0.4.0 新增 `platform` feature，但它不是 Casbin adapter，也不是通用策略语言。
+`rs-tenant` 和 Casbin 都可以参与授权，但定位不同。选择前先看你的核心问题是什么。
 
-## 一句话区别
+## 一句话
 
-- `rs-tenant`：SaaS RBAC 授权内核，强调强类型、范围计算和业务查询前过滤；v0.4.0 增加 sibling 平台授权。
-- Casbin：通用策略引擎，强调模型配置、matcher 表达能力和跨语言生态。
+- `rs-tenant`：Rust SaaS RBAC 授权内核，重点是强类型、租户内范围计算和查询前过滤。
+- Casbin：通用策略引擎，重点是模型配置、matcher 表达能力和跨语言生态。
 
-## 核心差异
+## 对比
 
-| 维度 | rs-tenant v0.4 | Casbin |
+| 维度 | rs-tenant | Casbin |
 |---|---|---|
-| 定位 | 租户内 RBAC core + 可选平台授权 | 通用策略框架 |
-| 主体模型 | `AuthSubject { tenant, principal }` / `PlatformSubject { principal }` | 由模型和策略自行定义 |
-| 权限模型 | `Permission { resource, action }` | 字符串策略和 matcher |
-| 范围模型 | `GrantScope` -> `AccessScope`，`PlatformGrantScope` -> `TenantDataAccessScope` | 需要自行建模 |
-| 查询前过滤 | `accessible_scope(ScopeQuery)` / `accessible_tenants(TenantDataScopeQuery)` | 通常需要额外设计 |
-| 目标点判定 | `can_access_scope(...)` / `can_access_tenant_scope(...)` | `enforce(...)` 或自定义 |
-| 租户级判定 | `can_tenant(...)` / `can_access_tenant(...)` | 由 matcher 表达 |
-| 数据源 | `AuthorizationSource` / `PlatformAuthorizationSource` 只读授权数据 | adapter 读写 policy |
-| 平台能力 | 独立 `platform` feature，无全局 bypass | 可自行建模 |
+| 主要场景 | Rust SaaS 租户内 RBAC | 通用访问控制 |
+| 主体模型 | 固定为 `AuthSubject`，平台另有 `PlatformSubject` | 由模型定义 |
+| 权限模型 | `resource:action` | policy 字符串和 matcher |
+| 数据范围 | 内置 `GrantScope` / `AccessScope` | 需要自行建模 |
+| 查询前过滤 | 一等 API：`accessible_scope` | 通常需要额外设计 |
+| 数据源 | 只读 `AuthorizationSource` | adapter 读写 policy |
+| 平台员工 | 可选 `platform` feature | 由模型自行表达 |
+| super admin | 不提供全局绕过 | 可自行建模 |
 
-## 为什么不保留空 feature？
+## 什么时候选 rs-tenant
 
-空 feature 会让调用方误以为：
+优先选 `rs-tenant`：
 
-- 已经存在 Casbin adapter。
-- Casbin policy 可以直接映射为 role assignment scope。
-- 两套最终判定可以安全叠加。
+- 服务主要用 Rust 写。
+- 核心是 SaaS 租户内 RBAC。
+- 权限需要和门店、区域、组织树等层级范围绑定。
+- 列表、搜索、导出必须先计算可见范围。
+- 团队希望授权规则在 Rust 类型和 API 里固定下来。
+- 你已经有用户、租户、角色管理系统，只缺授权内核。
 
-这些假设都不成立。v0.3 选择删除空开关，避免语义漂移。
+## 什么时候选 Casbin
 
-v0.4 的 `platform` feature 也不改变这一点。它提供的是 `PlatformEngine`、`PlatformAuthorizationSource`、`PlatformGrantScope` 和 `TenantDataAccessScope`，不是 Casbin adapter。
+优先选 Casbin：
 
-## 未来如果要适配 Casbin
+- 多语言服务需要共享一套策略体系。
+- 需要复杂 ABAC 或动态 matcher。
+- 授权模型经常变化，不能固定在 Rust 类型里。
+- 团队已有成熟 Casbin policy、adapter、管理后台和运维经验。
 
-必须先明确：
+## 能不能一起用
 
-1. Casbin 是最终决策源，还是只是授权数据源。
-2. tenant status 和 membership status 由谁维护。
-3. `RoleAssignment.scope` 如何从 policy 映射。
-4. `GrantScope::Tenant` 与 `GrantScope::Paths` 如何表达。
-5. 缓存失效由谁触发。
-6. explain 结果如何对齐。
+可以，但要明确谁是最终决策源。
 
-不建议在同一请求链路里同时做：
+不建议同一请求里同时做两个最终判定：
 
 ```rust
 engine.can_tenant(request).await? == AccessDecision::Allow
     && casbin.enforce(args)?
 ```
 
-两个最终判定源会制造语义漂移。若需要共存，应明确一个系统是最终授权源，另一个只作为数据来源或迁移过渡工具。
+这样会出现两套模型同时解释权限，后续很难排查。
 
-## 选型建议
+更清晰的方式是：
 
-优先选择 `rs-tenant`：
+- Casbin 作为最终决策源，`rs-tenant` 不参与这条链路。
+- 或 `rs-tenant` 作为最终决策源，Casbin 只作为迁移期数据来源。
 
-- 核心场景是 Rust + SaaS 租户内 RBAC。
-- 需要平台账号访问平台自身资源或跨租户数据范围，但不希望引入全局绕过。
-- 需要把授权范围转成数据库查询条件。
-- 希望用 Rust 类型约束权限、主体和范围。
-- 希望 core 只读授权数据，不托管 policy 管理后台。
+## 为什么没有 `casbin` feature
 
-优先选择 Casbin：
+旧版本里空的 `casbin` feature 容易让调用方误解为：
 
-- 需要跨语言统一策略体系。
-- 需要复杂 ABAC、动态 matcher 或多授权模型。
-- 团队已有成熟 Casbin policy、adapter 和运维体系。
+- 已经存在 Casbin adapter。
+- Casbin policy 可以自动映射为 `GrantScope`。
+- 两套最终判定可以安全叠加。
 
-## 继续阅读
-
-- [上一章：09. FAQ 与故障排查](09-faq-troubleshooting.md)
-- [下一章：11. 平台授权](11-platform-authorization.md)
-- [回到文档首页](README.md)
-- [返回目录](SUMMARY.md)
+这些假设都不成立，所以当前版本不保留这个空 feature。

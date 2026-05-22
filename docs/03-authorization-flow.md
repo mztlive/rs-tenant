@@ -1,242 +1,155 @@
-# 03. 授权流程详解
+# 03. 选择正确的授权 API
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](02-domain-model.md) | [下一章](04-quickstart.md)
 
-本章说明租户内 `Engine` 和平台 `PlatformEngine` 的核心调用如何执行。未启用 `platform` feature 时，只需要关注租户内流程。
+`rs-tenant` 刻意不提供一个语义模糊的 `can(...)`。你需要按业务场景选择 API。
 
-## `accessible_scope(...)`
+## 列表、搜索、导出：`accessible_scope`
 
-调用：
-
-```rust
-engine.accessible_scope(ScopeQuery { subject, permission }).await
-```
-
-执行顺序：
-
-1. 读取 `tenant_status(subject.tenant)`。
-2. 租户不是 `Active`：返回 `AccessScope::None`。
-3. 读取 `membership_status(subject)`。
-4. 成员不是 `Active`：返回 `AccessScope::None`。
-5. 读取 `role_assignments(subject)`。
-6. 没有角色分配：返回 `AccessScope::None`。
-7. 按配置展开角色继承。
-8. 读取角色权限，匹配 `query.permission`。
-9. 只收集权限命中的 role assignments 的 `GrantScope`。
-10. 合并命中范围：
-    - 没有命中：`AccessScope::None`
-    - 任一命中是 `GrantScope::Tenant`：`AccessScope::Tenant`
-    - 只有 path grants：`AccessScope::Paths`
-
-这个 API 适合列表、搜索、导出等需要把范围下推到数据查询的接口。
-
-## `can_access_scope(...)`
-
-调用：
+当接口要返回一批数据时，先计算可访问范围，再把范围下推到查询。
 
 ```rust
-engine
-    .can_access_scope(ScopedAccessRequest {
+use rs_tenant::{AccessScope, Permission, ScopeQuery};
+
+let scope = engine
+    .accessible_scope(ScopeQuery {
         subject,
-        permission,
-        target,
+        permission: Permission::parse("order:read")?,
     })
-    .await
-```
+    .await?;
 
-执行顺序：
-
-1. 按 `request.permission` 调用 `accessible_scope(...)`。
-2. `AccessScope::None`：返回 `AccessDecision::Deny`。
-3. `AccessScope::Tenant`：返回 `AccessDecision::Allow`。
-4. `AccessScope::Paths`：检查 `target` 是否被任一 root 覆盖。
-5. 覆盖则 `Allow`，否则 `Deny`。
-
-这个 API 适合读取、更新、删除某个有明确层级路径的业务对象。
-
-## `can_tenant(...)`
-
-调用：
-
-```rust
-engine
-    .can_tenant(TenantAccessRequest { subject, permission })
-    .await
-```
-
-执行顺序：
-
-1. 按 `request.permission` 调用 `accessible_scope(...)`。
-2. 只有 `AccessScope::Tenant` 返回 `AccessDecision::Allow`。
-3. `AccessScope::Paths` 返回 `AccessDecision::Deny`。
-4. `AccessScope::None` 返回 `AccessDecision::Deny`。
-
-这个 API 刻意不把路径级授权当成租户级授权，避免调用方绕过目标范围。
-
-适用：
-
-- 租户设置。
-- 租户级报表。
-- 不绑定下级业务对象的操作。
-
-不适用：
-
-- 查看某个门店订单。
-- 修改某个区域客户。
-- 删除某个层级资源。
-
-## `explain_*`
-
-解释 API 与主 API 语义一致，但返回轻量解释：
-
-```rust
-pub struct AccessExplanation {
-    pub decision: AccessDecision,
-    pub reason: Option<DenyReason>,
-    pub scope: AccessScope,
+match scope {
+    AccessScope::None => {
+        // 返回空列表，或按你的产品策略返回 403
+    }
+    AccessScope::Tenant { tenant } => {
+        // WHERE tenant_id = ?
+    }
+    AccessScope::Paths { tenant, roots } => {
+        // WHERE tenant_id = ? AND scope_path is under any root
+    }
 }
 ```
 
-要求：
+适合：
 
-- 能定位短路点。
-- 能区分权限缺失、需要目标范围、范围拒绝。
-- `AuthorizationSource` 错误通过 `Err` 返回，不塞进 `DenyReason`。
-- 不暴露敏感内部错误或数据库细节。
+- 订单列表。
+- 客户搜索。
+- 导出报表。
+- 看板聚合查询。
 
-## 角色继承
+## 单个对象：`can_access_scope`
 
-当 `EngineBuilder` 开启角色继承时：
-
-- Engine 负责展开父角色。
-- 当前 assignment 的 `GrantScope` 会沿用到父角色权限。
-- Engine 负责角色环检测和最大深度限制。
-- `AuthorizationSource::parent_roles(...)` 只提供数据，不实现策略。
-
-## 缓存参与点
-
-`MemoryCache` 或自定义缓存应缓存 effective grants，而不是裸 `Vec<Permission>`。`EffectiveGrant` 只服务 `Cache` 扩展点，不作为业务解释模型。缓存 key 需要包含：
-
-- tenant
-- principal
-- Engine 配置签名
-- role hierarchy / wildcard / max depth 等影响结果的配置
-
-建议每次授权前重新校验 tenant status 和 membership status，避免成员禁用后继续命中过期授权。
-
-## `PlatformEngine::can_platform(...)`
-
-调用：
+当接口访问一个确定对象时，先加载对象并得到它的真实 `ScopePath`，再做点判定。
 
 ```rust
-platform_engine
-    .can_platform(PlatformAccessRequest { subject, permission })
-    .await
-```
+use rs_tenant::{AccessDecision, Permission, ScopedAccessRequest};
 
-执行顺序：
-
-1. 读取 `platform_principal_status(subject)`。
-2. 平台主体不是 `Active`：返回 `AccessDecision::Deny`。
-3. 读取 `platform_role_assignments(subject)`。
-4. 没有平台角色分配：返回 `AccessDecision::Deny`。
-5. 按 `PlatformEngineConfig` 展开平台角色继承。
-6. 读取平台角色权限，匹配 `request.permission`。
-7. 只允许命中 `PlatformGrantScope::Platform` 的 assignment。
-8. 命中则 `Allow`，否则 `Deny`。
-
-`AllTenants`、`Tenants`、`TenantPaths` 不会被当作平台自身资源权限。
-
-## `PlatformEngine::accessible_tenants(...)`
-
-调用：
-
-```rust
-platform_engine
-    .accessible_tenants(TenantDataScopeQuery { subject, permission })
-    .await
-```
-
-执行顺序：
-
-1. 读取平台主体状态。
-2. 主体不是 `Active`：返回 `TenantDataAccessScope::None`。
-3. 读取平台角色分配。
-4. 展开平台角色继承。
-5. 读取平台角色权限，匹配 `query.permission`。
-6. 收集权限命中的租户数据范围。
-7. 合并命中范围：
-   - 没有命中：`TenantDataAccessScope::None`
-   - 任一命中是 `AllTenants`：`TenantDataAccessScope::AllTenants`
-   - 命中租户集合：`TenantDataAccessScope::Tenants`
-   - 命中路径集合：`TenantDataAccessScope::TenantPaths`
-   - 同一 permission 同时命中租户集合与路径集合：返回错误；v0.4.0 的 `TenantDataAccessScope` 不表达混合结果。
-
-这个 API 适合平台租户列表、跨租户业务列表、导出等需要把范围下推到业务查询的接口。
-
-## `PlatformEngine::can_access_tenant(...)`
-
-调用：
-
-```rust
-platform_engine
-    .can_access_tenant(TenantDataAccessRequest {
+let order = repo.load_order(order_id).await?;
+let decision = engine
+    .can_access_scope(ScopedAccessRequest {
         subject,
-        permission,
-        tenant,
+        permission: Permission::parse("order:update")?,
+        target: order.scope_path(),
     })
-    .await
+    .await?;
+
+if decision == AccessDecision::Deny {
+    // 返回 403
+}
 ```
 
-执行顺序：
+适合：
 
-1. 按 `request.permission` 调用 `accessible_tenants(...)`。
-2. `TenantDataAccessScope::AllTenants`：返回 `AccessDecision::Allow`。
-3. `TenantDataAccessScope::Tenants` 包含目标租户：返回 `AccessDecision::Allow`。
-4. `TenantDataAccessScope::TenantPaths`：返回 `AccessDecision::Deny`，因为目标路径必需。
-5. `TenantDataAccessScope::None` 或租户不匹配：返回 `AccessDecision::Deny`。
+- 读取订单详情。
+- 修改某个客户。
+- 删除某个门店下的配置。
+- 下载某个具体文件。
 
-路径级平台授权不会被当成租户级平台授权。
+重点：目标路径来自业务数据，不来自客户端自报。
 
-## `PlatformEngine::can_access_tenant_scope(...)`
+## 租户级操作：`can_tenant`
 
-调用：
+当操作没有更细的业务对象路径，且必须要求全租户范围时，使用 `can_tenant`。
 
 ```rust
-platform_engine
-    .can_access_tenant_scope(TenantScopedDataAccessRequest {
+use rs_tenant::{AccessDecision, Permission, TenantAccessRequest};
+
+let decision = engine
+    .can_tenant(TenantAccessRequest {
         subject,
-        permission,
-        tenant,
-        target,
+        permission: Permission::parse("tenant/settings:update")?,
     })
-    .await
+    .await?;
 ```
 
-执行顺序：
+适合：
 
-1. 按 `request.permission` 调用 `accessible_tenants(...)`。
-2. `TenantDataAccessScope::AllTenants`：返回 `AccessDecision::Allow`。
-3. `TenantDataAccessScope::Tenants` 包含目标租户：返回 `AccessDecision::Allow`。
-4. `TenantDataAccessScope::TenantPaths`：检查目标租户下的 roots 是否覆盖 `target`。
-5. 覆盖则 `Allow`，否则 `Deny`。
+- 租户设置。
+- 租户级账单配置。
+- 全租户报表开关。
 
-平台路径判定复用 `ScopePath` 的相等或祖先路径规则。
+如果主体只有某些路径的授权，`can_tenant` 会拒绝。它不会把路径级授权升级为全租户授权。
 
-## 平台角色继承
+## 排查问题：`explain_*`
 
-当 `PlatformEngineConfig` 开启角色继承时：
+线上主链路通常只需要 decision 或 scope。测试、日志和排障可以使用解释 API：
 
-- `PlatformEngine` 负责展开父平台角色。
-- 当前 `PlatformRoleAssignment` 的 `PlatformGrantScope` 会沿用到父角色权限。
-- `PlatformEngine` 负责平台角色环检测和最大深度限制。
-- `PlatformAuthorizationSource::platform_parent_roles(...)` 只提供数据，不实现策略。
+```rust
+let explanation = engine
+    .explain_tenant(TenantAccessRequest {
+        subject,
+        permission: Permission::parse("tenant/settings:update")?,
+    })
+    .await?;
+```
 
-平台角色继承不参与租户内 `Engine`。
+解释结果包含：
 
-## 继续阅读
+- `decision`
+- `reason`
+- `scope`
 
-- [上一章：02. 领域模型与权限语义](02-domain-model.md)
-- [下一章：04. 5 分钟快速接入](04-quickstart.md)
-- [11. 平台授权](11-platform-authorization.md)
-- [返回目录](SUMMARY.md)
+数据源错误仍然通过 `Err` 返回，不会被伪装成 deny reason。
+
+## 引擎内部按什么顺序判断
+
+租户内主流程是：
+
+1. 读取租户状态。
+2. 读取成员状态。
+3. 读取角色分配。
+4. 如果启用角色继承，展开父角色。
+5. 读取角色权限。
+6. 匹配请求权限。
+7. 合并命中的授权范围。
+8. 按调用的 API 返回 scope 或 decision。
+
+任意状态无效、权限不匹配或范围不覆盖，最终都会拒绝。
+
+## 角色继承和 wildcard
+
+默认建议先关闭，业务确实需要时再开启：
+
+```rust
+let engine = EngineBuilder::new(source)
+    .enable_role_hierarchy(true)
+    .enable_wildcard(true)
+    .max_role_depth(16)
+    .build();
+```
+
+角色继承只继承权限，不改变当前角色分配的范围。也就是说，如果 `store_reader` 继承了 `order_reader` 的权限，最终范围仍然是 `store_reader` 这次 assignment 上的 `GrantScope`。
+
+## 平台授权 API 对照
+
+启用 `platform` feature 后，对应 API 是：
+
+| 场景 | API |
+|---|---|
+| 平台自身资源，如平台角色管理 | `PlatformEngine::can_platform` |
+| 跨租户列表、搜索、导出 | `PlatformEngine::accessible_tenants` |
+| 指定租户级平台操作 | `PlatformEngine::can_access_tenant` |
+| 指定租户下的路径对象 | `PlatformEngine::can_access_tenant_scope` |
+
+平台 API 详见 [11. 平台授权：平台员工和跨租户数据](11-platform-authorization.md)。

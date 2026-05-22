@@ -2,132 +2,138 @@
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](08-testing-benchmark.md) | [下一章](10-rs-tenant-vs-casbin.md)
 
-## Q1: 为什么有角色还是返回 `AccessScope::None`？
+## 有角色为什么还是 `AccessScope::None`？
 
-按顺序检查：
+按这个顺序查：
 
 1. `tenant_status` 是否返回 `TenantStatus::Active`。
 2. `membership_status` 是否返回 `MembershipStatus::Active`。
-3. `role_assignments` 是否返回了至少一个 assignment。
-4. assignment 是否带了显式 `GrantScope`。
+3. `role_assignments` 是否返回了该主体的角色分配。
+4. 每个 assignment 是否有正确的 `GrantScope`。
 5. `role_permissions` 是否包含请求的完整 `Permission`。
-6. wildcard 是否已开启。
-7. 角色继承是否已开启，以及父角色是否能正确读取。
+6. 如果权限使用 `*:*`、`order:*` 或 `*:read`，是否开启了 `enable_wildcard(true)`。
+7. 如果权限来自父角色，是否开启了 `enable_role_hierarchy(true)`。
 
-## Q2: 为什么列表接口不能只按 resource 查询范围？
+## 为什么列表接口不能只按 resource 查范围？
 
-因为不同 action 可能有不同授权范围：
+同一个 resource 的不同 action 可以有不同范围：
 
-- `order:read` 允许两个门店。
-- `order:update` 只允许一个门店。
-- `order:delete` 完全不允许。
+```text
+order:read   -> agent/1
+order:update -> agent/1/store/9
+order:delete -> none
+```
 
-所以 `ScopeQuery` 必须带完整 `Permission`，不能只带 `Resource`。
+所以 `ScopeQuery` 必须传完整 `Permission`。
 
-## Q3: 为什么 `can_tenant` 拒绝了路径级授权？
+## 为什么 `can_tenant` 拒绝了路径级授权？
 
-这是 v0.3 的刻意设计。`can_tenant` 只允许 `AccessScope::Tenant`，不接受 `AccessScope::Paths`。
+`can_tenant` 只接受最终范围为 `AccessScope::Tenant` 的授权。路径级范围不能执行租户级操作。
 
-如果操作目标是某个门店、区域、客户、订单，请使用 `can_access_scope`。如果是列表或搜索，请使用 `accessible_scope`。
+如果操作对象有路径，用 `can_access_scope`。如果是列表，用 `accessible_scope`。
 
-## Q4: 如何做租户内管理员？
+## 怎么做租户管理员？
 
-用普通 RBAC 表达：
+使用普通 RBAC：
 
 ```text
 role: tenant_admin
 permission: *:*
-assignment scope: GrantScope::Tenant
+assignment scope: GrantScope::tenant()
 ```
 
-然后在 `EngineBuilder` 开启 wildcard。这样管理员仍然受 tenant active 和 membership active 约束。
+然后构建引擎时开启 wildcard：
 
-## Q5: v0.4 有了 platform，为什么仍然没有 SuperAdmin？
+```rust
+let engine = EngineBuilder::new(source).enable_wildcard(true).build();
+```
 
-super admin 是绕过策略，不是 RBAC 授权范围。把它放进 core 会模糊平台 super admin、租户 super admin、运维救援三种不同风险面。
+这不是 super admin。租户禁用或成员禁用仍然拒绝。
 
-推荐：
+## 数据库错误应该返回 403 吗？
 
-- 租户内管理员：普通角色 + `GrantScope::Tenant`。
-- 平台后台权限：启用 `platform` feature，用 `PlatformGrantScope::Platform`。
-- 平台跨租户数据管理：启用 `platform` feature，用 `AllTenants`、`Tenants` 或 `TenantPaths` 表达数据范围。
-- 运维救援：应用层记录审批、原因、过期时间和审计日志。
+不应该。`AuthorizationSource` 错误是系统错误，通常映射为 500，并记录日志。
 
-`PlatformGrantScope::AllTenants` 不是全局绕过；它只对某个 `Permission` 表示平台主体的租户数据范围。
+403 表示认证通过但授权拒绝。数据库超时、连接失败、反序列化失败都不是“没有权限”。
 
-## Q6: 权限更新后为什么行为没变化？
+## 权限更新后为什么没生效？
 
-高概率是缓存未失效。按变更范围调用：
+如果启用了缓存，先确认是否调用了正确的失效入口：
 
-- `invalidate_principal(tenant, principal)`
-- `invalidate_role(tenant, role)`
-- `invalidate_tenant(tenant)`
-- `invalidate_all()`
+- 成员状态或角色分配变化：`invalidate_principal`。
+- 角色权限变化：`invalidate_role`。
+- 租户禁用：`invalidate_tenant`。
+- 影响范围不清楚：`invalidate_all`。
 
-如果暂时没有可靠失效入口，先禁用缓存，确认授权正确性后再启用。
+排查时可以先临时禁用缓存，确认数据源和引擎规则本身正确。
 
-## Q7: `AuthorizationSource` 应该实现哪些规则？
+## wildcard 为什么没匹配？
 
-只实现数据读取：
+检查两点：
 
-- tenant status
-- membership status
-- role assignments
-- role permissions
-- parent roles
+1. `EngineBuilder::enable_wildcard(true)` 是否开启。
+2. wildcard 是否是支持的形态：`*:*`、`resource:*`、`*:action`。
 
-不要在 Source 里实现 permission match、wildcard、role 展开、scope 合并或 path allows。这些规则属于领域类型和 Engine。
+`billing/*:read` 这类层级 wildcard 不支持。
 
-## Q8: Axum 中的 `401`、`403`、`500` 怎么区分？
+## 角色继承为什么没生效？
 
-- `401`：认证信息缺失或无效，无法构造 `AuthSubject`。
-- `403`：认证通过，但授权结果是拒绝。
-- `500`：`AuthorizationSource` 或业务数据读取异常。
+检查：
 
-## Q9: 平台主体能不能直接调用租户内 `Engine`？
+- 是否开启 `enable_role_hierarchy(true)`。
+- `parent_roles` 是否返回直接父角色。
+- 父角色权限是否能通过 `role_permissions` 读取。
+- 是否超过 `max_role_depth`。
+- 是否存在角色环。
 
-不能。租户内 `Engine` 的主体是 `AuthSubject { tenant, principal }`，必须经过 tenant status 和 membership status。平台主体是 `PlatformSubject { principal }`，应交给 `PlatformEngine`。
+父角色权限继承后，范围仍然使用当前 assignment 的 `GrantScope`。
 
-如果业务确实要让平台客服临时代查某个租户内数据，有两种清晰做法：
+## Axum 里 401、403、500 怎么分？
 
-1. 启用 `platform` feature，用 `accessible_tenants` 或 `can_access_tenant_scope` 计算平台数据范围。
-2. 不启用 `platform` 时，由应用层显式创建有时效的租户内 membership / role assignment，再按普通 `AuthSubject` 调用租户内 `Engine`。
+| 状态码 | 含义 |
+|---|---|
+| 401 | 没有认证信息，或 token/session 无效 |
+| 403 | 认证成功，但 `rs-tenant` 返回拒绝 |
+| 500 | 数据源、业务查询或系统错误 |
 
-不要在 `Engine` 外层加“如果是平台用户就直接 allow”的全局分支。
+## 平台主体能不能直接调用租户内 `Engine`？
 
-## Q10: `Platform`、`AllTenants`、`Tenants`、`TenantPaths` 有什么区别？
+不能。租户内 `Engine` 需要 `AuthSubject { tenant, principal }`，并且会检查租户成员状态。
 
-- `Platform`：只访问平台自身资源，例如平台角色管理。
-- `AllTenants`：访问所有租户的数据管理范围。
-- `Tenants`：访问明确租户集合的数据。
-- `TenantPaths`：访问指定租户下指定路径 roots 及其子孙。
+平台员工应使用 `PlatformEngine`。如果你不启用 `platform`，应用层必须显式创建有时效的租户 membership 和 role assignment，再按普通租户成员授权。
 
-`can_platform` 只接受 `Platform`。`can_access_tenant` 不会把 `TenantPaths` 当成租户级权限。`can_access_tenant_scope` 才会检查路径覆盖。
+## 为什么 v0.4 仍然没有 SuperAdmin？
 
-## 排查日志建议
+super admin 是绕过策略，不是 RBAC 范围。把它放进 core 会模糊三种不同场景：
 
-至少记录：
+- 租户内管理员。
+- 平台后台管理员。
+- 运维救援。
+
+推荐做法：
+
+- 租户内管理员：普通角色 + `GrantScope::tenant()`。
+- 平台后台：`platform` feature + `PlatformGrantScope::platform()`。
+- 跨租户数据：`platform` feature + `AllTenants`、`Tenants` 或 `TenantPaths`。
+- 运维救援：应用层维护审批、原因、过期时间和审计日志。
+
+## 日志建议记录什么？
+
+租户内授权至少记录：
 
 - tenant
 - principal
 - permission
-- request kind：`scope_query` / `scoped_access` / `tenant_access`
+- request kind
 - decision
 - access scope
 - deny reason
-- engine config：wildcard、role hierarchy、max depth
+- wildcard / role hierarchy / max depth
 - cache hit / miss
 
-平台授权还应记录：
+平台授权额外记录：
 
 - platform principal
-- platform request kind：`platform_access` / `tenant_data_scope` / `tenant_data_access` / `tenant_scoped_data_access`
+- platform request kind
 - tenant data access scope
-- platform engine config：wildcard、role hierarchy、max depth
-
-## 继续阅读
-
-- [上一章：08. 测试与性能基准](08-testing-benchmark.md)
-- [下一章：10. Casbin 边界](10-rs-tenant-vs-casbin.md)
-- [11. 平台授权](11-platform-authorization.md)
-- [返回目录](SUMMARY.md)
+- platform engine config

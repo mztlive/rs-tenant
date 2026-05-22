@@ -1,56 +1,56 @@
-# rs-tenant 文档
+# rs-tenant 开发者使用手册
 
-`rs-tenant` v0.4.0 是一个面向 Rust SaaS 系统的 RBAC 授权内核。默认核心仍是 v0.3.0 的租户内授权模型；启用 `platform` feature 后，额外提供 sibling `PlatformEngine` 来处理平台自身权限和平台账号可管理的租户数据范围。
+这份文档面向准备把 `rs-tenant` 接入 Rust SaaS 服务的开发者。阅读顺序按接入路径组织：先跑通一个最小授权，再把它接到数据库、Web 层、平台后台和测试体系里。
 
-它不托管业务模型，不提供平台级绕过能力，也不实现通用策略语言；它只根据主体、角色分配、权限和授权范围计算访问结果。
+`rs-tenant` 只做授权计算：
 
-## 快速入口
+- 从你的数据源读取租户、成员、角色、权限和授权范围。
+- 返回 `AccessDecision`，告诉你是否允许。
+- 返回 `AccessScope` 或 `TenantDataAccessScope`，让你把可见范围下推到 SQL、ORM 或搜索条件。
 
-- [01. 项目总览](01-overview.md)
-- [02. 领域模型与权限语义](02-domain-model.md)
-- [03. 授权流程详解](03-authorization-flow.md)
-- [04. 5 分钟快速接入](04-quickstart.md)
-- [05. 生产环境集成指南](05-integration-production.md)
-- [06. Axum 与 JWT 集成](06-axum-integration.md)
-- [07. 典型案例](07-examples.md)
-- [08. 测试与性能基准](08-testing-benchmark.md)
-- [09. FAQ 与故障排查](09-faq-troubleshooting.md)
-- [10. Casbin 边界](10-rs-tenant-vs-casbin.md)
-- [11. 平台授权](11-platform-authorization.md)
-- [12. 性能基线记录](12-perf-baseline.md)
-- [v0.3 重构方案](redesign-v0.3.md)
-- [v0.4 平台授权设计方案](redesign-v0.4.md)
-
-## 你将学到什么
-
-- 如何用 `AuthSubject` 表达租户内主体。
-- 如何用 `GrantScope` 表达角色分配授予的范围。
-- 如何用 `AccessScope` 作为查询前过滤条件。
-- 何时调用 `accessible_scope`、`can_access_scope`、`can_tenant`。
-- 如何实现 `AuthorizationSource` 接入生产数据库。
-- 如何使用 `MemorySource` 和 `MemoryCache` 做本地验证与缓存。
-- 如何启用 `platform` feature，使用 `PlatformEngine`、`PlatformSubject`、`PlatformGrantScope` 和 `TenantDataAccessScope`。
-- 为什么 v0.3 删除旧 `authorize/scope/Store/GlobalRole/SuperAdmin/casbin` 兼容层。
-- 为什么 v0.4 平台授权不是 `GlobalRole` 或 `SuperAdmin` 的回归。
+它不提供用户系统、租户管理、角色管理后台、ORM、迁移脚本或审计日志。
 
 ## 推荐阅读路径
 
-业务接入优先：
+1. [01. 先理解它解决什么问题](01-overview.md)
+2. [02. 把业务概念映射到授权模型](02-domain-model.md)
+3. [03. 选择正确的授权 API](03-authorization-flow.md)
+4. [04. 5 分钟跑通第一个授权](04-quickstart.md)
+5. [05. 接入生产数据源](05-integration-production.md)
+6. [06. 接入 Axum 和 JWT](06-axum-integration.md)
+7. [07. 常见业务场景](07-examples.md)
+8. [08. 测试、缓存和性能验证](08-testing-benchmark.md)
+9. [09. FAQ 与故障排查](09-faq-troubleshooting.md)
+10. [10. 和 Casbin 怎么取舍](10-rs-tenant-vs-casbin.md)
+11. [11. 平台授权：平台员工和跨租户数据](11-platform-authorization.md)
+12. [12. 性能基线记录](12-perf-baseline.md)
 
-1. [01. 项目总览](01-overview.md)
-2. [04. 5 分钟快速接入](04-quickstart.md)
-3. [07. 典型案例](07-examples.md)
-4. [09. FAQ 与故障排查](09-faq-troubleshooting.md)
+历史设计记录放在附录：
 
-架构设计优先：
+- [v0.3 重构方案](redesign-v0.3.md)
+- [v0.4 平台授权设计方案](redesign-v0.4.md)
 
-1. [02. 领域模型与权限语义](02-domain-model.md)
-2. [03. 授权流程详解](03-authorization-flow.md)
-3. [05. 生产环境集成指南](05-integration-production.md)
-4. [08. 测试与性能基准](08-testing-benchmark.md)
-5. [10. Casbin 边界](10-rs-tenant-vs-casbin.md)
-6. [11. 平台授权](11-platform-authorization.md)
-7. [12. 性能基线记录](12-perf-baseline.md)
-8. [v0.4 平台授权设计方案](redesign-v0.4.md)
+## 接入前你需要准备什么
 
-完整目录见 [SUMMARY.md](SUMMARY.md)。
+- 一个已经完成认证的主体 id，比如用户 id、员工 id 或账号 id。
+- 一个当前租户 id。
+- 一套角色分配数据：谁在某个租户下拥有哪个角色。
+- 一套角色权限数据：角色拥有哪些 `resource:action` 权限。
+- 一套授权范围数据：每次角色分配覆盖全租户，还是覆盖某些层级路径。
+
+如果你还没有真实数据库表，可以先用 `memory-store` feature 跑通示例。
+
+## 最重要的规则
+
+- 默认拒绝：任何缺失、禁用、没有匹配权限、没有显式范围或数据源错误都不会放行。
+- 范围绑定在角色分配上，不绑定在用户或 membership 上。
+- 列表接口先调用 `accessible_scope`，再把结果转成查询条件。
+- 访问单个对象时，先从数据库查出对象真实归属路径，再调用 `can_access_scope`。
+- 租户级操作使用 `can_tenant`，路径级授权不会被当成全租户授权。
+- 平台员工使用 `platform` feature 下的 `PlatformEngine`，不要塞进租户内 `Engine`。
+
+## 本地预览
+
+```bash
+mdbook serve
+```
