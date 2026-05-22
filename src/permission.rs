@@ -4,10 +4,12 @@ use std::fmt;
 
 const MAX_PERMISSION_PART_LEN: usize = 128;
 
+/// 修剪权限片段并转换为小写。
 fn normalize(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
+/// 校验权限资源或动作片段。
 fn validate_segment(value: &str, kind: &str, allow_slash: bool) -> Result<()> {
     if value.is_empty() {
         return Err(Error::InvalidPermission(format!(
@@ -52,19 +54,19 @@ macro_rules! define_permission_part {
         pub struct $name(String);
 
         impl $name {
-            /// Parses, normalizes, and validates the value.
+            /// 解析、规范化并校验取值。
             pub fn parse(value: impl AsRef<str>) -> Result<Self> {
                 let normalized = normalize(value.as_ref());
                 validate_segment(&normalized, $kind, $allow_slash)?;
                 Ok(Self(normalized))
             }
 
-            /// Returns the normalized value.
+            /// 返回规范化后的取值。
             pub fn as_str(&self) -> &str {
                 &self.0
             }
 
-            /// Returns whether this part is a complete wildcard.
+            /// 返回该片段是否为完整通配符。
             pub fn is_wildcard(&self) -> bool {
                 self.0 == "*"
             }
@@ -120,19 +122,19 @@ macro_rules! define_permission_part {
 }
 
 define_permission_part!(
-    /// Permission resource, for example `billing/invoice`.
+    /// 权限资源，例如 `billing/invoice`。
     Resource,
     "resource",
     true
 );
 define_permission_part!(
-    /// Permission action, for example `read`.
+    /// 权限动作，例如 `read`。
     Action,
     "action",
     false
 );
 
-/// A normalized `resource:action` permission.
+/// 规范化后的 `resource:action` 权限。
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Permission {
     resource: Resource,
@@ -140,12 +142,12 @@ pub struct Permission {
 }
 
 impl Permission {
-    /// Creates a permission from validated parts.
+    /// 从已校验片段创建权限。
     pub fn new(resource: Resource, action: Action) -> Self {
         Self { resource, action }
     }
 
-    /// Parses a `resource:action` string.
+    /// 解析 `resource:action` 字符串。
     pub fn parse(value: impl AsRef<str>) -> Result<Self> {
         let normalized = normalize(value.as_ref());
         let mut parts = normalized.split(':');
@@ -164,22 +166,22 @@ impl Permission {
         ))
     }
 
-    /// Returns the resource part.
+    /// 返回资源片段。
     pub fn resource(&self) -> &Resource {
         &self.resource
     }
 
-    /// Returns the action part.
+    /// 返回动作片段。
     pub fn action(&self) -> &Action {
         &self.action
     }
 
-    /// Returns whether this permission contains any wildcard part.
+    /// 返回该权限是否包含任意通配符片段。
     pub fn has_wildcard(&self) -> bool {
         self.resource.is_wildcard() || self.action.is_wildcard()
     }
 
-    /// Returns whether this granted permission covers `required`.
+    /// 返回当前授予的权限是否覆盖 `required`。
     pub fn matches(&self, required: &Permission, enable_wildcard: bool) -> bool {
         if !enable_wildcard && self.has_wildcard() {
             return false;

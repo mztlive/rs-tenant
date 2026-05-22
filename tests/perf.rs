@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 const REPEATS: usize = 5;
 
+/// 同步重复执行指定操作并打印中位数指标。
 fn benchmark_sync<F>(name: &str, iterations: usize, mut op: F)
 where
     F: FnMut(),
@@ -35,6 +36,7 @@ where
     );
 }
 
+/// 并行重复执行指定操作并打印中位数指标。
 fn benchmark_parallel<F>(name: &str, threads: usize, iterations_per_thread: usize, op_factory: F)
 where
     F: Fn() -> Box<dyn FnMut() + Send> + Send + Sync + 'static,
@@ -72,6 +74,7 @@ where
     );
 }
 
+/// 构造路径级性能测试使用的扁平授权数据源。
 fn setup_flat_source() -> (MemorySource, AuthSubject, Permission, ScopePath) {
     let source = MemorySource::new();
     let tenant = TenantId::parse("tenant_perf").unwrap();
@@ -98,6 +101,7 @@ fn setup_flat_source() -> (MemorySource, AuthSubject, Permission, ScopePath) {
     )
 }
 
+/// 构造角色继承性能测试使用的数据源。
 fn setup_hierarchy_source(depth: usize) -> (MemorySource, AuthSubject, Permission, usize) {
     let source = MemorySource::new();
     let tenant = TenantId::parse("tenant_hier_perf").unwrap();

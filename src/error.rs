@@ -3,31 +3,31 @@ use crate::ids::{RoleId, TenantId};
 use crate::platform::PlatformRoleId;
 use thiserror::Error;
 
-/// Authorization source error type.
+/// 授权数据源错误类型。
 pub type SourceError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Crate result type.
+/// crate 内统一使用的结果类型。
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Errors returned by this crate.
+/// 这个 crate 返回的错误。
 #[derive(Debug, Error)]
 pub enum Error {
-    /// Authorization source error wrapper.
+    /// 授权数据源错误包装。
     #[error("source error: {0}")]
     Source(#[source] SourceError),
-    /// Invalid identifier input.
+    /// 标识符输入非法。
     #[error("invalid id: {0}")]
     InvalidId(String),
-    /// Invalid permission input.
+    /// 权限输入非法。
     #[error("invalid permission: {0}")]
     InvalidPermission(String),
-    /// Invalid scope input.
+    /// 范围输入非法。
     #[error("invalid scope: {0}")]
     InvalidScope(String),
-    /// Role inheritance cycle detected.
+    /// 检测到角色继承环。
     #[error("role cycle detected for tenant {tenant} at role {role}")]
     RoleCycleDetected { tenant: TenantId, role: RoleId },
-    /// Role inheritance depth exceeded.
+    /// 角色继承深度超过限制。
     #[error(
         "role inheritance depth exceeded for tenant {tenant} at role {role}; max depth {max_depth}"
     )]
@@ -36,25 +36,26 @@ pub enum Error {
         role: RoleId,
         max_depth: usize,
     },
-    /// Platform role inheritance cycle detected.
+    /// 检测到平台角色继承环。
     #[cfg(feature = "platform")]
     #[error("platform role cycle detected at role {role}")]
     PlatformRoleCycleDetected {
-        /// Role where the cycle was detected.
+        /// 检测到环的角色。
         role: PlatformRoleId,
     },
-    /// Platform role inheritance depth exceeded.
+    /// 平台角色继承深度超过限制。
     #[cfg(feature = "platform")]
     #[error("platform role inheritance depth exceeded at role {role}; max depth {max_depth}")]
     PlatformRoleDepthExceeded {
-        /// Role where the depth limit was exceeded.
+        /// 超过深度限制的角色。
         role: PlatformRoleId,
-        /// Configured maximum inheritance depth.
+        /// 配置的最大继承深度。
         max_depth: usize,
     },
 }
 
 impl From<SourceError> for Error {
+    /// 将授权数据源错误包装为 crate 错误。
     fn from(error: SourceError) -> Self {
         Self::Source(error)
     }

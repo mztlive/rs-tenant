@@ -76,7 +76,7 @@ pub enum GrantScope {
 }
 
 pub struct ScopeRoots {
-    // private fields
+    // 私有字段
 }
 
 pub enum AccessScope {

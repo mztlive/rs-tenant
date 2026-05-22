@@ -4,6 +4,7 @@ use std::fmt;
 
 const MAX_PLATFORM_ID_LEN: usize = 128;
 
+/// 修剪并校验平台级标识符。
 fn validate_platform_id(value: &str, kind: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -32,12 +33,12 @@ macro_rules! define_platform_id {
         pub struct $name(String);
 
         impl $name {
-            /// Parses and validates a platform identifier.
+            /// 解析并校验平台级标识符。
             pub fn parse(value: impl AsRef<str>) -> Result<Self> {
                 validate_platform_id(value.as_ref(), $kind).map(Self)
             }
 
-            /// Returns the identifier as a string slice.
+            /// 以字符串切片形式返回标识符。
             pub fn as_str(&self) -> &str {
                 &self.0
             }
@@ -93,12 +94,12 @@ macro_rules! define_platform_id {
 }
 
 define_platform_id!(
-    /// Platform principal identifier.
+    /// 平台主体标识符。
     PlatformPrincipalId,
     "platform principal id"
 );
 define_platform_id!(
-    /// Platform-scoped role identifier.
+    /// 平台级角色标识符。
     PlatformRoleId,
     "platform role id"
 );

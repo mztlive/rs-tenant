@@ -4,6 +4,7 @@ use std::fmt;
 
 const MAX_ID_LEN: usize = 128;
 
+/// 修剪并校验通用标识符。
 fn validate_id(value: &str, kind: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -32,12 +33,12 @@ macro_rules! define_id {
         pub struct $name(String);
 
         impl $name {
-            /// Parses and validates an identifier.
+            /// 解析并校验标识符。
             pub fn parse(value: impl AsRef<str>) -> Result<Self> {
                 validate_id(value.as_ref(), $kind).map(Self)
             }
 
-            /// Returns the identifier as a string slice.
+            /// 以字符串切片形式返回标识符。
             pub fn as_str(&self) -> &str {
                 &self.0
             }
@@ -93,17 +94,17 @@ macro_rules! define_id {
 }
 
 define_id!(
-    /// Tenant identifier.
+    /// 租户标识符。
     TenantId,
     "tenant id"
 );
 define_id!(
-    /// Principal identifier within a tenant authorization context.
+    /// 租户授权上下文中的主体标识符。
     PrincipalId,
     "principal id"
 );
 define_id!(
-    /// Tenant-scoped role identifier.
+    /// 租户级角色标识符。
     RoleId,
     "role id"
 );

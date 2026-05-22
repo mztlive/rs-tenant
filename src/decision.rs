@@ -1,36 +1,36 @@
 use crate::scope::AccessScope;
 
-/// Final allow/deny decision.
+/// 最终的允许或拒绝决策。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessDecision {
-    /// Access is allowed.
+    /// 允许访问。
     Allow,
-    /// Access is denied.
+    /// 拒绝访问。
     Deny,
 }
 
-/// High-level deny reason for explanation and tests.
+/// 用于解释和测试的高层拒绝原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenyReason {
-    /// Tenant is inactive or missing.
+    /// 租户不存在或未激活。
     TenantInactive,
-    /// Principal membership is inactive or missing.
+    /// 主体成员关系不存在或未激活。
     PrincipalInactive,
-    /// No matching permission grant exists.
+    /// 没有匹配的权限授权。
     PermissionMissing,
-    /// Tenant-level API was called with only path-scoped grants.
+    /// 只有路径级授权时调用了租户级 API。
     TargetScopeRequired,
-    /// Target path is outside the accessible roots.
+    /// 目标路径不在可访问根路径内。
     ScopeDenied,
 }
 
-/// Lightweight explanation for an authorization decision.
+/// 授权决策的轻量解释信息。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccessExplanation {
-    /// Final decision.
+    /// 最终决策。
     pub decision: AccessDecision,
-    /// Deny reason when decision is [`AccessDecision::Deny`].
+    /// 当决策为 [`AccessDecision::Deny`] 时的拒绝原因。
     pub reason: Option<DenyReason>,
-    /// Effective scope computed during the check.
+    /// 检查过程中计算出的有效访问范围。
     pub scope: AccessScope,
 }

@@ -117,7 +117,7 @@ let scope = engine
 
 match scope {
     AccessScope::Paths { roots, .. } => {
-        // roots 已经去重，并删除被祖先覆盖的子路径
+        // 根路径已经去重，并删除被祖先覆盖的子路径
         assert!(!roots.is_empty());
     }
     _ => {}

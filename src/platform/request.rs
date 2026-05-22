@@ -1,48 +1,48 @@
 use super::PlatformSubject;
 use crate::{Permission, ScopePath, TenantId};
 
-/// Platform-owned resource access request.
+/// 平台自有资源访问请求。
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PlatformAccessRequest {
-    /// Platform subject.
+    /// 平台主体。
     pub subject: PlatformSubject,
-    /// Full permission, including action.
+    /// 包含动作的完整权限。
     pub permission: Permission,
 }
 
-/// Query for a platform principal's accessible tenant data scope.
+/// 查询平台主体可访问的租户数据范围。
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TenantDataScopeQuery {
-    /// Platform subject.
+    /// 平台主体。
     pub subject: PlatformSubject,
-    /// Full permission, including action.
+    /// 包含动作的完整权限。
     pub permission: Permission,
 }
 
-/// Tenant-level data access request for a platform principal.
+/// 平台主体的租户级数据访问请求。
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TenantDataAccessRequest {
-    /// Platform subject.
+    /// 平台主体。
     pub subject: PlatformSubject,
-    /// Full permission, including action.
+    /// 包含动作的完整权限。
     pub permission: Permission,
-    /// Target tenant.
+    /// 目标租户。
     pub tenant: TenantId,
 }
 
-/// Tenant path data access request for a platform principal.
+/// 平台主体的租户路径数据访问请求。
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TenantScopedDataAccessRequest {
-    /// Platform subject.
+    /// 平台主体。
     pub subject: PlatformSubject,
-    /// Full permission, including action.
+    /// 包含动作的完整权限。
     pub permission: Permission,
-    /// Target tenant.
+    /// 目标租户。
     pub tenant: TenantId,
-    /// Target path within the tenant.
+    /// 租户内的目标路径。
     pub target: ScopePath,
 }

@@ -1,8 +1,7 @@
-//! Platform authorization domain.
+//! 平台级授权领域。
 //!
-//! This module is a sibling of the tenant-scoped [`crate::Engine`]. It models
-//! platform principals, platform roles, platform-owned permissions, and the
-//! tenant data ranges a platform principal may manage.
+//! 本模块是租户级 [`crate::Engine`] 的同级模块，用于建模平台主体、平台角色、平台自有权限，
+//! 以及平台主体可以管理的租户数据范围。
 
 mod engine;
 mod ids;

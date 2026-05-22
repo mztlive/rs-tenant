@@ -2,36 +2,36 @@ use crate::error::{Error, Result};
 use crate::{ScopePath, ScopeRoots, TenantId};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Scope granted by a platform role assignment.
+/// 平台角色分配授予的范围。
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum PlatformGrantScope {
-    /// Grant for platform-owned resources only.
+    /// 仅授予平台自有资源。
     Platform,
-    /// Grant for every tenant and every tenant path.
+    /// 授予所有租户和所有租户路径。
     AllTenants,
-    /// Grant for an explicit set of tenants.
+    /// 授予显式指定的租户集合。
     Tenants(TenantSet),
-    /// Grant for explicit roots within explicit tenants.
+    /// 授予显式租户内的显式根路径。
     TenantPaths(TenantScopeRoots),
 }
 
 impl PlatformGrantScope {
-    /// Creates a platform-only grant scope.
+    /// 创建仅平台资源的授权范围。
     pub fn platform() -> Self {
         Self::Platform
     }
 
-    /// Creates an all-tenants grant scope.
+    /// 创建所有租户授权范围。
     pub fn all_tenants() -> Self {
         Self::AllTenants
     }
 
-    /// Creates a tenant-set grant scope.
+    /// 创建租户集合授权范围。
     pub fn tenants(tenants: Vec<TenantId>) -> Result<Self> {
         TenantSet::new(tenants).map(Self::Tenants)
     }
 
-    /// Creates a tenant-path grant scope.
+    /// 创建租户路径授权范围。
     pub fn tenant_paths(entries: Vec<TenantScopedRoots>) -> Result<Self> {
         TenantScopeRoots::new(entries).map(Self::TenantPaths)
     }
@@ -89,14 +89,14 @@ impl<'de> serde::Deserialize<'de> for PlatformGrantScope {
     }
 }
 
-/// Non-empty, de-duplicated set of tenant identifiers.
+/// 非空且已去重的租户标识符集合。
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TenantSet {
     tenants: Vec<TenantId>,
 }
 
 impl TenantSet {
-    /// Creates a non-empty tenant set.
+    /// 创建非空租户集合。
     pub fn new(tenants: Vec<TenantId>) -> Result<Self> {
         if tenants.is_empty() {
             return Err(Error::InvalidScope(
@@ -112,17 +112,17 @@ impl TenantSet {
         })
     }
 
-    /// Returns tenants as a slice.
+    /// 以切片形式返回租户集合。
     pub fn as_slice(&self) -> &[TenantId] {
         &self.tenants
     }
 
-    /// Consumes this set and returns the de-duplicated tenants.
+    /// 消耗集合并返回已去重租户。
     pub fn into_vec(self) -> Vec<TenantId> {
         self.tenants
     }
 
-    /// Returns whether this set contains `tenant`.
+    /// 返回集合是否包含 `tenant`。
     pub fn contains(&self, tenant: &TenantId) -> bool {
         self.tenants.iter().any(|entry| entry == tenant)
     }
@@ -149,31 +149,31 @@ impl<'de> serde::Deserialize<'de> for TenantSet {
     }
 }
 
-/// Scope roots for a single tenant.
+/// 单个租户的范围根路径。
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TenantScopedRoots {
-    /// Tenant covered by these roots.
+    /// 这些根路径覆盖的租户。
     pub tenant: TenantId,
-    /// Compacted roots covered within the tenant.
+    /// 租户内覆盖的压缩根路径。
     pub roots: ScopeRoots,
 }
 
 impl TenantScopedRoots {
-    /// Creates tenant-scoped roots.
+    /// 创建租户级根路径。
     pub fn new(tenant: TenantId, roots: ScopeRoots) -> Self {
         Self { tenant, roots }
     }
 }
 
-/// Non-empty, compacted tenant-scoped root entries.
+/// 非空且已压缩的租户级根路径条目。
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TenantScopeRoots {
     entries: Vec<TenantScopedRoots>,
 }
 
 impl TenantScopeRoots {
-    /// Creates tenant-scoped roots, merging entries for the same tenant.
+    /// 创建租户级根路径，并合并同一租户的条目。
     pub fn new(entries: Vec<TenantScopedRoots>) -> Result<Self> {
         if entries.is_empty() {
             return Err(Error::InvalidScope(
@@ -199,17 +199,17 @@ impl TenantScopeRoots {
         Ok(Self { entries: compacted })
     }
 
-    /// Returns the compacted entries.
+    /// 返回压缩后的条目。
     pub fn as_slice(&self) -> &[TenantScopedRoots] {
         &self.entries
     }
 
-    /// Consumes this wrapper and returns the compacted entries.
+    /// 消耗包装类型并返回压缩后的条目。
     pub fn into_vec(self) -> Vec<TenantScopedRoots> {
         self.entries
     }
 
-    /// Returns whether these roots cover `target` within `tenant`.
+    /// 返回这些根路径是否覆盖 `tenant` 内的 `target`。
     pub fn allows_path(&self, tenant: &TenantId, target: &ScopePath) -> bool {
         self.entries
             .iter()
@@ -245,21 +245,21 @@ impl<'de> serde::Deserialize<'de> for TenantScopeRoots {
     }
 }
 
-/// Merged tenant data access scope for a platform permission query.
+/// 平台权限查询合并后的租户数据访问范围。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TenantDataAccessScope {
-    /// No matching tenant data access.
+    /// 没有匹配的租户数据访问权。
     None,
-    /// Every tenant and every tenant path is accessible.
+    /// 可以访问所有租户和所有租户路径。
     AllTenants,
-    /// Explicit tenants are accessible at tenant level.
+    /// 显式租户可以在租户级访问。
     Tenants {
-        /// De-duplicated tenants.
+        /// 已去重租户。
         tenants: Vec<TenantId>,
     },
-    /// Explicit tenant path roots are accessible.
+    /// 显式租户路径根可以访问。
     TenantPaths {
-        /// Compacted tenant path entries.
+        /// 压缩后的租户路径条目。
         entries: Vec<TenantScopedRoots>,
     },
 }
@@ -325,6 +325,7 @@ impl<'de> serde::Deserialize<'de> for TenantDataAccessScope {
 }
 
 impl TenantDataAccessScope {
+    /// 合并平台授权范围为最终租户数据访问范围。
     pub(crate) fn merge(scopes: impl IntoIterator<Item = PlatformGrantScope>) -> Result<Self> {
         let mut tenants = Vec::new();
         let mut path_entries = Vec::new();
@@ -361,7 +362,7 @@ impl TenantDataAccessScope {
         }
     }
 
-    /// Returns whether tenant-level access is allowed.
+    /// 返回是否允许租户级访问。
     pub fn allows_tenant(&self, tenant: &TenantId) -> bool {
         match self {
             Self::AllTenants => true,
@@ -370,7 +371,7 @@ impl TenantDataAccessScope {
         }
     }
 
-    /// Returns whether path-level access is allowed.
+    /// 返回是否允许路径级访问。
     pub fn allows_path(&self, tenant: &TenantId, target: &ScopePath) -> bool {
         match self {
             Self::AllTenants => true,
@@ -397,10 +398,12 @@ mod tests {
     };
     use crate::{ScopePath, ScopeRoots, TenantId};
 
+    /// 解析测试租户标识符。
     fn tenant(value: &str) -> TenantId {
         TenantId::parse(value).expect("tenant")
     }
 
+    /// 将测试路径片段构造成根路径集合。
     fn roots(values: &[&str]) -> ScopeRoots {
         ScopeRoots::new(
             values

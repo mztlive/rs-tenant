@@ -7,12 +7,13 @@ use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-/// In-memory platform authorization source for tests and demos.
+/// 用于测试和演示的内存平台授权数据源。
 #[derive(Debug, Default, Clone)]
 pub struct MemoryPlatformSource {
     inner: Arc<Inner>,
 }
 
+/// 内存平台数据源的共享内部状态。
 #[derive(Debug, Default)]
 struct Inner {
     principals: RwLock<HashMap<PlatformPrincipalId, PlatformPrincipalStatus>>,
@@ -21,6 +22,7 @@ struct Inner {
     parent_roles: RwLock<HashMap<PlatformRoleId, HashSet<PlatformRoleId>>>,
 }
 
+/// 获取读锁，并在锁中毒时恢复内部值。
 fn read_guard<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     match lock.read() {
         Ok(guard) => guard,
@@ -28,6 +30,7 @@ fn read_guard<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     }
 }
 
+/// 获取写锁，并在锁中毒时恢复内部值。
 fn write_guard<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     match lock.write() {
         Ok(guard) => guard,
@@ -36,12 +39,12 @@ fn write_guard<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 }
 
 impl MemoryPlatformSource {
-    /// Creates an empty platform source.
+    /// 创建空平台数据源。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Sets principal status.
+    /// 设置平台主体状态。
     pub fn set_principal_status(
         &self,
         principal: PlatformPrincipalId,
@@ -50,7 +53,7 @@ impl MemoryPlatformSource {
         write_guard(&self.inner.principals).insert(principal, status);
     }
 
-    /// Adds a role assignment.
+    /// 添加平台角色分配。
     pub fn add_role_assignment(
         &self,
         principal: PlatformPrincipalId,
@@ -63,7 +66,7 @@ impl MemoryPlatformSource {
             .push(PlatformRoleAssignment::new(role, scope));
     }
 
-    /// Adds a permission to a role.
+    /// 为平台角色添加权限。
     pub fn add_role_permission(&self, role: PlatformRoleId, permission: Permission) {
         write_guard(&self.inner.role_permissions)
             .entry(role)
@@ -71,7 +74,7 @@ impl MemoryPlatformSource {
             .insert(permission);
     }
 
-    /// Adds a direct parent role.
+    /// 添加直接父平台角色。
     pub fn add_parent_role(&self, role: PlatformRoleId, parent: PlatformRoleId) {
         write_guard(&self.inner.parent_roles)
             .entry(role)
@@ -82,6 +85,7 @@ impl MemoryPlatformSource {
 
 #[async_trait]
 impl PlatformAuthorizationSource for MemoryPlatformSource {
+    /// 查询平台主体状态，未配置时默认为未激活。
     async fn platform_principal_status(
         &self,
         subject: &PlatformSubject,
@@ -92,6 +96,7 @@ impl PlatformAuthorizationSource for MemoryPlatformSource {
             .unwrap_or(PlatformPrincipalStatus::Inactive))
     }
 
+    /// 查询平台主体的角色分配。
     async fn platform_role_assignments(
         &self,
         subject: &PlatformSubject,
@@ -102,6 +107,7 @@ impl PlatformAuthorizationSource for MemoryPlatformSource {
             .unwrap_or_default())
     }
 
+    /// 查询平台角色拥有的权限集合。
     async fn platform_role_permissions(
         &self,
         role: &PlatformRoleId,
@@ -112,6 +118,7 @@ impl PlatformAuthorizationSource for MemoryPlatformSource {
             .unwrap_or_default())
     }
 
+    /// 查询平台角色的直接父角色集合。
     async fn platform_parent_roles(
         &self,
         role: &PlatformRoleId,

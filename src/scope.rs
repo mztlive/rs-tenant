@@ -6,12 +6,12 @@ use std::fmt;
 
 const MAX_SCOPE_PATH_LEN: usize = 256;
 
-/// Hierarchical scope path, for example `agent/123/store/456`.
+/// 层级范围路径，例如 `agent/123/store/456`。
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct ScopePath(String);
 
 impl ScopePath {
-    /// Parses and validates a scope path.
+    /// 解析并校验范围路径。
     pub fn parse(value: impl AsRef<str>) -> Result<Self> {
         let trimmed = value.as_ref().trim();
         if trimmed.is_empty() {
@@ -42,17 +42,17 @@ impl ScopePath {
         Ok(Self(trimmed.to_string()))
     }
 
-    /// Returns the path string.
+    /// 返回路径字符串。
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Returns whether this path is a strict ancestor of `other`.
+    /// 返回当前路径是否为 `other` 的严格祖先。
     pub fn is_ancestor_of(&self, other: &ScopePath) -> bool {
         self != other && other.0.starts_with(&format!("{}/", self.0))
     }
 
-    /// Returns whether this path allows access to `target`.
+    /// 返回当前路径是否允许访问 `target`。
     pub fn allows(&self, target: &ScopePath) -> bool {
         self == target || self.is_ancestor_of(target)
     }
@@ -105,23 +105,23 @@ impl<'de> serde::Deserialize<'de> for ScopePath {
     }
 }
 
-/// Scope granted by a single role assignment.
+/// 单个角色分配授予的范围。
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum GrantScope {
-    /// Tenant-wide grant.
+    /// 租户级授权。
     Tenant,
-    /// Grant rooted at one or more scope paths.
+    /// 以一个或多个范围路径为根的授权。
     Paths(ScopeRoots),
 }
 
-/// Non-empty, compacted scope roots.
+/// 非空且已压缩的范围根路径集合。
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ScopeRoots {
     roots: Vec<ScopePath>,
 }
 
 impl ScopeRoots {
-    /// Creates validated scope roots.
+    /// 创建已校验的范围根路径集合。
     pub fn new(roots: Vec<ScopePath>) -> Result<Self> {
         if roots.is_empty() {
             return Err(Error::InvalidScope(
@@ -133,34 +133,34 @@ impl ScopeRoots {
         })
     }
 
-    /// Returns the compacted roots.
+    /// 返回压缩后的根路径。
     pub fn as_slice(&self) -> &[ScopePath] {
         &self.roots
     }
 
-    /// Consumes the wrapper and returns the roots.
+    /// 消耗包装类型并返回根路径。
     pub fn into_vec(self) -> Vec<ScopePath> {
         self.roots
     }
 }
 
 impl GrantScope {
-    /// Creates a tenant-wide grant scope.
+    /// 创建租户级授权范围。
     pub fn tenant() -> Self {
         Self::Tenant
     }
 
-    /// Creates a path grant scope.
+    /// 创建路径级授权范围。
     pub fn paths(roots: Vec<ScopePath>) -> Result<Self> {
         ScopeRoots::new(roots).map(Self::Paths)
     }
 
-    /// Returns whether this grant covers the whole tenant.
+    /// 返回该授权是否覆盖整个租户。
     pub fn is_tenant(&self) -> bool {
         matches!(self, Self::Tenant)
     }
 
-    /// Returns path roots for path grants.
+    /// 返回路径级授权的根路径。
     pub fn roots(&self) -> &[ScopePath] {
         match self {
             Self::Tenant => &[],
@@ -231,24 +231,24 @@ impl<'de> serde::Deserialize<'de> for GrantScope {
     }
 }
 
-/// Merged access scope for a concrete permission query.
+/// 针对具体权限查询合并后的访问范围。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccessScope {
-    /// No matching access.
+    /// 没有匹配的访问权。
     None,
-    /// Tenant-wide access.
+    /// 租户级访问权。
     Tenant { tenant: TenantId },
-    /// Path-rooted access.
+    /// 基于路径根的访问权。
     Paths {
-        /// Tenant for the query.
+        /// 查询所属租户。
         tenant: TenantId,
-        /// Compacted roots that cover all allowed descendants.
+        /// 覆盖所有允许后代路径的压缩根路径。
         roots: Vec<ScopePath>,
     },
 }
 
 impl AccessScope {
-    /// Merges grant scopes into a final access scope.
+    /// 将授权范围合并为最终访问范围。
     pub fn merge(tenant: TenantId, grants: impl IntoIterator<Item = GrantScope>) -> Self {
         let mut roots = Vec::new();
         for grant in grants {
@@ -267,7 +267,7 @@ impl AccessScope {
         }
     }
 
-    /// Returns whether this scope allows a target path.
+    /// 返回该范围是否允许访问目标路径。
     pub fn allows_path(&self, target: &ScopePath) -> bool {
         match self {
             Self::None => false,
@@ -277,6 +277,7 @@ impl AccessScope {
     }
 }
 
+/// 对根路径去重，并删除已被祖先路径覆盖的子路径。
 fn compact_paths(roots: Vec<ScopePath>) -> Vec<ScopePath> {
     let ordered: BTreeSet<_> = roots.into_iter().collect();
     let mut compacted: Vec<ScopePath> = Vec::new();

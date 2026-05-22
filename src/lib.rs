@@ -1,12 +1,10 @@
-//! Tenant-scoped RBAC authorization kernel.
+//! 租户级 RBAC 授权内核。
 //!
-//! This crate answers one core question: given a tenant, a principal, and a
-//! permission, what access scope is granted by tenant role assignments?
+//! 这个 crate 回答一个核心问题：给定租户、主体和权限后，租户角色分配到底授予了什么访问范围。
 //!
-//! v0.4 keeps the tenant-scoped core API as [`Engine::accessible_scope`],
-//! [`Engine::can_access_scope`], and [`Engine::can_tenant`].
-//! Platform authorization is available behind the `platform` feature through
-//! the sibling [`platform`] module.
+//! v0.4 保留租户级核心 API：[`Engine::accessible_scope`]、[`Engine::can_access_scope`]
+//! 和 [`Engine::can_tenant`]。
+//! 平台级授权通过 `platform` feature 下的同级 [`platform`] 模块提供。
 #![forbid(unsafe_code)]
 
 mod cache;

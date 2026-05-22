@@ -3,20 +3,20 @@ use crate::permission::Permission;
 use crate::scope::GrantScope;
 use async_trait::async_trait;
 
-/// Internal effective grant cached per tenant principal and engine config.
+/// 按租户主体和引擎配置缓存的内部有效授权。
 #[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectiveGrant {
-    /// Role from which the permission was read.
+    /// 读取到权限的来源角色。
     pub role: RoleId,
-    /// Permission granted by the role.
+    /// 角色授予的权限。
     pub permission: Permission,
-    /// Scope attached to the original role assignment.
+    /// 原始角色分配附带的范围。
     pub scope: GrantScope,
 }
 
 impl EffectiveGrant {
-    /// Creates an effective grant.
+    /// 创建有效授权。
     pub fn new(role: RoleId, permission: Permission, scope: GrantScope) -> Self {
         Self {
             role,
@@ -26,10 +26,10 @@ impl EffectiveGrant {
     }
 }
 
-/// Cache interface for effective grants.
+/// 有效授权的缓存接口。
 #[async_trait]
 pub trait Cache: Send + Sync {
-    /// Gets cached grants for a tenant principal under a config signature.
+    /// 按配置签名获取租户主体的缓存授权。
     async fn get_effective_grants(
         &self,
         tenant: &TenantId,
@@ -37,7 +37,7 @@ pub trait Cache: Send + Sync {
         config_signature: &str,
     ) -> Option<Vec<EffectiveGrant>>;
 
-    /// Sets cached grants for a tenant principal under a config signature.
+    /// 按配置签名写入租户主体的缓存授权。
     async fn set_effective_grants(
         &self,
         tenant: &TenantId,
@@ -46,25 +46,26 @@ pub trait Cache: Send + Sync {
         grants: Vec<EffectiveGrant>,
     );
 
-    /// Invalidates cache for a principal.
+    /// 失效某个主体的缓存。
     async fn invalidate_principal(&self, tenant: &TenantId, principal: &PrincipalId);
 
-    /// Invalidates cache for a role.
+    /// 失效某个角色相关的缓存。
     async fn invalidate_role(&self, tenant: &TenantId, role: &RoleId);
 
-    /// Invalidates cache for a tenant.
+    /// 失效某个租户的缓存。
     async fn invalidate_tenant(&self, tenant: &TenantId);
 
-    /// Invalidates all cached grants.
+    /// 失效所有缓存授权。
     async fn invalidate_all(&self);
 }
 
-/// No-op cache implementation.
+/// 空操作缓存实现。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoCache;
 
 #[async_trait]
 impl Cache for NoCache {
+    /// 始终返回缓存未命中。
     async fn get_effective_grants(
         &self,
         _tenant: &TenantId,
@@ -74,6 +75,7 @@ impl Cache for NoCache {
         None
     }
 
+    /// 忽略缓存写入。
     async fn set_effective_grants(
         &self,
         _tenant: &TenantId,
@@ -83,11 +85,15 @@ impl Cache for NoCache {
     ) {
     }
 
+    /// 忽略主体级缓存失效。
     async fn invalidate_principal(&self, _tenant: &TenantId, _principal: &PrincipalId) {}
 
+    /// 忽略角色级缓存失效。
     async fn invalidate_role(&self, _tenant: &TenantId, _role: &RoleId) {}
 
+    /// 忽略租户级缓存失效。
     async fn invalidate_tenant(&self, _tenant: &TenantId) {}
 
+    /// 忽略全量缓存失效。
     async fn invalidate_all(&self) {}
 }

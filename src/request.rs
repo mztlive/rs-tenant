@@ -2,51 +2,51 @@ use crate::ids::{PrincipalId, TenantId};
 use crate::permission::Permission;
 use crate::scope::ScopePath;
 
-/// Tenant-scoped subject for authorization.
+/// 用于授权的租户级主体。
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AuthSubject {
-    /// Tenant identifier.
+    /// 租户标识符。
     pub tenant: TenantId,
-    /// Principal identifier.
+    /// 主体标识符。
     pub principal: PrincipalId,
 }
 
 impl AuthSubject {
-    /// Creates an authorization subject.
+    /// 创建授权主体。
     pub fn new(tenant: TenantId, principal: PrincipalId) -> Self {
         Self { tenant, principal }
     }
 }
 
-/// Query for a permission's accessible data scope.
+/// 查询某个权限可访问的数据范围。
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScopeQuery {
-    /// Tenant-scoped subject.
+    /// 租户级主体。
     pub subject: AuthSubject,
-    /// Full permission, including action.
+    /// 包含动作的完整权限。
     pub permission: Permission,
 }
 
-/// Tenant-level access request.
+/// 租户级访问请求。
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TenantAccessRequest {
-    /// Tenant-scoped subject.
+    /// 租户级主体。
     pub subject: AuthSubject,
-    /// Full permission, including action.
+    /// 包含动作的完整权限。
     pub permission: Permission,
 }
 
-/// Path-scoped access request.
+/// 路径级访问请求。
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScopedAccessRequest {
-    /// Tenant-scoped subject.
+    /// 租户级主体。
     pub subject: AuthSubject,
-    /// Full permission, including action.
+    /// 包含动作的完整权限。
     pub permission: Permission,
-    /// Target path being accessed.
+    /// 正在访问的目标路径。
     pub target: ScopePath,
 }

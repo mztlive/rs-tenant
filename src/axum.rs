@@ -1,4 +1,4 @@
-//! Axum integration utilities for tenant-scoped and platform authorization.
+//! 面向租户级和平台级授权的 Axum 集成工具。
 
 use std::future::poll_fn;
 use std::pin::Pin;
@@ -23,15 +23,15 @@ use ::axum::http::{Request, StatusCode};
 use ::axum::response::{IntoResponse, Response};
 use ::tower::{Layer, Service};
 
-/// Authentication context extracted from a request.
+/// 从请求中提取的认证上下文。
 #[derive(Debug, Clone)]
 pub struct AuthContext {
-    /// Tenant-scoped subject.
+    /// 租户级主体。
     pub subject: AuthSubject,
 }
 
 impl AuthContext {
-    /// Creates an auth context.
+    /// 创建认证上下文。
     pub fn new(tenant: TenantId, principal: PrincipalId) -> Self {
         Self {
             subject: AuthSubject::new(tenant, principal),
@@ -39,17 +39,17 @@ impl AuthContext {
     }
 }
 
-/// Platform authentication context extracted from a request.
+/// 从请求中提取的平台认证上下文。
 #[cfg(feature = "platform")]
 #[derive(Debug, Clone)]
 pub struct PlatformAuthContext {
-    /// Platform-scoped subject.
+    /// 平台级主体。
     pub subject: PlatformSubject,
 }
 
 #[cfg(feature = "platform")]
 impl PlatformAuthContext {
-    /// Creates a platform auth context.
+    /// 创建平台认证上下文。
     pub fn new(principal: PlatformPrincipalId) -> Self {
         Self {
             subject: PlatformSubject::new(principal),
@@ -57,7 +57,7 @@ impl PlatformAuthContext {
     }
 }
 
-/// Middleware layer that authorizes tenant-level requests.
+/// 对租户级请求执行授权的中间件层。
 #[derive(Debug, Clone)]
 pub struct TenantAuthorizeLayer<S, C> {
     engine: Arc<Engine<S, C>>,
@@ -65,7 +65,7 @@ pub struct TenantAuthorizeLayer<S, C> {
 }
 
 impl<S, C> TenantAuthorizeLayer<S, C> {
-    /// Creates a new tenant authorization layer.
+    /// 创建租户授权中间件层。
     pub fn new(engine: Arc<Engine<S, C>>, permission: Permission) -> Self {
         Self { engine, permission }
     }
@@ -78,6 +78,7 @@ where
 {
     type Service = TenantAuthorizeService<Inner, S, C>;
 
+    /// 将租户授权层应用到内层服务。
     fn layer(&self, inner: Inner) -> Self::Service {
         TenantAuthorizeService {
             inner,
@@ -87,7 +88,7 @@ where
     }
 }
 
-/// Middleware service that enforces tenant-level permission checks.
+/// 执行租户级权限检查的中间件服务。
 #[derive(Debug, Clone)]
 pub struct TenantAuthorizeService<Inner, S, C> {
     inner: Inner,
@@ -106,10 +107,12 @@ where
     type Error = Inner::Error;
     type Future = Pin<Box<dyn std::future::Future<Output = Result<Response, Self::Error>> + Send>>;
 
+    /// 标记中间件始终可以接收请求。
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
+    /// 授权通过后将请求转交给内层服务。
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let mut inner = self.inner.clone();
         let engine = self.engine.clone();
@@ -145,7 +148,7 @@ where
     }
 }
 
-/// Middleware layer that authorizes platform-owned resource requests.
+/// 对平台自有资源请求执行授权的中间件层。
 #[cfg(feature = "platform")]
 #[derive(Debug, Clone)]
 pub struct PlatformAuthorizeLayer<S> {
@@ -155,7 +158,7 @@ pub struct PlatformAuthorizeLayer<S> {
 
 #[cfg(feature = "platform")]
 impl<S> PlatformAuthorizeLayer<S> {
-    /// Creates a new platform authorization layer.
+    /// 创建平台授权中间件层。
     pub fn new(engine: Arc<PlatformEngine<S>>, permission: Permission) -> Self {
         Self { engine, permission }
     }
@@ -168,6 +171,7 @@ where
 {
     type Service = PlatformAuthorizeService<Inner, S>;
 
+    /// 将平台授权层应用到内层服务。
     fn layer(&self, inner: Inner) -> Self::Service {
         PlatformAuthorizeService {
             inner,
@@ -177,7 +181,7 @@ where
     }
 }
 
-/// Middleware service that enforces platform-owned resource permission checks.
+/// 执行平台自有资源权限检查的中间件服务。
 #[cfg(feature = "platform")]
 #[derive(Debug, Clone)]
 pub struct PlatformAuthorizeService<Inner, S> {
@@ -197,10 +201,12 @@ where
     type Error = Inner::Error;
     type Future = Pin<Box<dyn std::future::Future<Output = Result<Response, Self::Error>> + Send>>;
 
+    /// 标记中间件始终可以接收请求。
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
+    /// 授权通过后将请求转交给内层服务。
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let mut inner = self.inner.clone();
         let engine = self.engine.clone();
@@ -238,7 +244,7 @@ where
     }
 }
 
-/// Checks a scoped request with an explicit target path.
+/// 使用显式目标路径检查范围级请求。
 pub async fn can_access_scope<S, C>(
     engine: &Engine<S, C>,
     subject: AuthSubject,
@@ -258,7 +264,7 @@ where
         .await
 }
 
-/// Checks a platform-owned resource request.
+/// 检查平台自有资源请求。
 #[cfg(feature = "platform")]
 pub async fn can_platform<S>(
     engine: &PlatformEngine<S>,
@@ -300,27 +306,27 @@ pub mod jwt {
     use ::axum::response::{IntoResponse, Response};
     use ::tower::{Layer, Service};
 
-    /// Errors returned by JWT auth helpers.
+    /// JWT 认证辅助逻辑返回的错误。
     #[derive(Debug, Error)]
     pub enum AuthError {
-        /// Authorization header is missing.
+        /// 缺少 Authorization 请求头。
         #[error("missing authorization header")]
         MissingAuthorization,
-        /// Authorization header format is invalid.
+        /// Authorization 请求头格式非法。
         #[error("invalid authorization header")]
         InvalidAuthorization,
-        /// JWT validation error.
+        /// JWT 校验失败。
         #[error("invalid token")]
         InvalidToken,
-        /// Required claims are missing or invalid.
+        /// 必需声明缺失或非法。
         #[error("invalid claims: {0}")]
         InvalidClaims(String),
-        /// Invalid identifier.
+        /// 标识符非法。
         #[error("invalid id: {0}")]
         InvalidId(String),
     }
 
-    /// Rejection type for axum extractors.
+    /// Axum 提取器使用的拒绝类型。
     #[derive(Debug)]
     pub struct AuthRejection {
         status: StatusCode,
@@ -328,6 +334,7 @@ pub mod jwt {
     }
 
     impl From<AuthError> for AuthRejection {
+        /// 将认证错误转换成 Axum 拒绝类型。
         fn from(err: AuthError) -> Self {
             Self {
                 status: StatusCode::UNAUTHORIZED,
@@ -337,43 +344,46 @@ pub mod jwt {
     }
 
     impl IntoResponse for AuthRejection {
+        /// 将拒绝类型转换成 HTTP 响应。
         fn into_response(self) -> Response {
             (self.status, self.message).into_response()
         }
     }
 
-    /// Claims type used to extract tenant/principal identifiers from JWTs.
+    /// 用于从 JWT 中提取租户和主体标识符的声明类型。
     pub trait JwtClaims: DeserializeOwned + Send + Sync + Clone + 'static {
-        /// Returns the tenant identifier string.
+        /// 返回租户标识符字符串。
         fn tenant_id(&self) -> &str;
-        /// Returns the principal identifier string.
+        /// 返回主体标识符字符串。
         fn principal_id(&self) -> &str;
     }
 
-    /// Default JWT claims shape: `{ tenant_id, principal_id }`.
+    /// 默认 JWT 声明结构：`{ tenant_id, principal_id }`。
     #[derive(Debug, Clone, serde::Deserialize)]
     pub struct DefaultClaims {
-        /// Tenant identifier.
+        /// 租户标识符。
         pub tenant_id: String,
-        /// Principal identifier.
+        /// 主体标识符。
         pub principal_id: String,
-        /// Standard JWT subject.
+        /// 标准 JWT 主题字段。
         pub sub: Option<String>,
-        /// Standard JWT expiration.
+        /// 标准 JWT 过期时间。
         pub exp: Option<usize>,
     }
 
     impl JwtClaims for DefaultClaims {
+        /// 返回默认声明中的租户标识符。
         fn tenant_id(&self) -> &str {
             &self.tenant_id
         }
 
+        /// 返回默认声明中的主体标识符。
         fn principal_id(&self) -> &str {
             &self.principal_id
         }
     }
 
-    /// JWT auth state holding decoding settings.
+    /// 持有解码配置的 JWT 认证状态。
     #[derive(Clone)]
     pub struct JwtAuthState<C: JwtClaims> {
         decoding_key: Arc<DecodingKey>,
@@ -382,6 +392,7 @@ pub mod jwt {
     }
 
     impl<C: JwtClaims> fmt::Debug for JwtAuthState<C> {
+        /// 调试输出时隐藏解码密钥。
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.debug_struct("JwtAuthState")
                 .field("decoding_key", &"<redacted>")
@@ -391,7 +402,7 @@ pub mod jwt {
     }
 
     impl<C: JwtClaims> JwtAuthState<C> {
-        /// Creates a new JWT auth state.
+        /// 创建 JWT 认证状态。
         pub fn new(decoding_key: DecodingKey, validation: Validation) -> Self {
             Self {
                 decoding_key: Arc::new(decoding_key),
@@ -400,6 +411,7 @@ pub mod jwt {
             }
         }
 
+        /// 从请求头中解码 JWT 并构造认证上下文。
         fn decode_from_headers(&self, headers: &HeaderMap) -> Result<JwtAuth<C>, AuthError> {
             let token = bearer_token(headers)?;
             let data = decode::<C>(&token, &self.decoding_key, &self.validation)
@@ -408,22 +420,23 @@ pub mod jwt {
         }
     }
 
-    /// Provides access to [`JwtAuthState`] for extractors.
+    /// 为提取器提供 [`JwtAuthState`] 访问能力。
     pub trait JwtAuthProvider<C: JwtClaims> {
-        /// Returns the JWT auth state for decoding.
+        /// 返回用于解码的 JWT 认证状态。
         fn jwt_auth(&self) -> &JwtAuthState<C>;
     }
 
-    /// Extracted JWT auth context plus claims.
+    /// 已提取的 JWT 认证上下文和声明。
     #[derive(Debug, Clone)]
     pub struct JwtAuth<C: JwtClaims> {
-        /// Parsed auth context.
+        /// 解析出的认证上下文。
         pub context: AuthContext,
-        /// Full claims.
+        /// 完整声明。
         pub claims: C,
     }
 
     impl<C: JwtClaims> JwtAuth<C> {
+        /// 从声明中解析租户和主体标识符。
         fn from_claims(claims: C) -> Result<Self, AuthError> {
             let tenant = TenantId::parse(claims.tenant_id())
                 .map_err(|err| AuthError::InvalidId(err.to_string()))?;
@@ -443,6 +456,7 @@ pub mod jwt {
     {
         type Rejection = AuthRejection;
 
+        /// 从请求部件中提取或复用 JWT 认证结果。
         async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
             if let Some(existing) = parts.extensions.get::<JwtAuth<C>>() {
                 return Ok(existing.clone());
@@ -461,20 +475,21 @@ pub mod jwt {
     {
         type Rejection = AuthRejection;
 
+        /// 使用默认声明从请求部件中提取认证上下文。
         async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
             let auth = JwtAuth::<DefaultClaims>::from_request_parts(parts, state).await?;
             Ok(auth.context)
         }
     }
 
-    /// Middleware layer that decodes JWT and inserts auth context into request extensions.
+    /// 解码 JWT 并把认证上下文写入请求扩展的中间件层。
     #[derive(Debug, Clone)]
     pub struct JwtAuthLayer<C: JwtClaims> {
         state: Arc<JwtAuthState<C>>,
     }
 
     impl<C: JwtClaims> JwtAuthLayer<C> {
-        /// Creates a new JWT auth layer.
+        /// 创建 JWT 认证中间件层。
         pub fn new(state: JwtAuthState<C>) -> Self {
             Self {
                 state: Arc::new(state),
@@ -488,6 +503,7 @@ pub mod jwt {
     {
         type Service = JwtAuthService<S, C>;
 
+        /// 将 JWT 认证层应用到内层服务。
         fn layer(&self, inner: S) -> Self::Service {
             JwtAuthService {
                 inner,
@@ -496,7 +512,7 @@ pub mod jwt {
         }
     }
 
-    /// Middleware service that decodes JWT and attaches [`AuthContext`].
+    /// 解码 JWT 并附加 [`AuthContext`] 的中间件服务。
     #[derive(Debug, Clone)]
     pub struct JwtAuthService<S, C: JwtClaims> {
         inner: S,
@@ -514,10 +530,12 @@ pub mod jwt {
         type Future =
             Pin<Box<dyn std::future::Future<Output = Result<Response, Self::Error>> + Send>>;
 
+        /// 标记中间件始终可以接收请求。
         fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
 
+        /// 解码请求中的 JWT，并在成功后调用内层服务。
         fn call(&mut self, mut req: Request<Body>) -> Self::Future {
             let state = self.state.clone();
             let mut inner = self.inner.clone();
@@ -537,6 +555,7 @@ pub mod jwt {
         }
     }
 
+    /// 从 Authorization 请求头中提取 Bearer 令牌。
     fn bearer_token(headers: &HeaderMap) -> Result<String, AuthError> {
         let value = headers
             .get(AUTHORIZATION)
@@ -566,6 +585,7 @@ mod tests {
     use std::future::{Ready, ready};
 
     #[derive(Clone)]
+    /// 用于中间件测试的成功响应服务。
     struct OkService;
 
     impl Service<Request<Body>> for OkService {
@@ -573,15 +593,18 @@ mod tests {
         type Error = Infallible;
         type Future = Ready<Result<Response, Self::Error>>;
 
+        /// 测试服务始终可用。
         fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
 
+        /// 返回无内容成功响应。
         fn call(&mut self, _req: Request<Body>) -> Self::Future {
             ready(Ok(StatusCode::NO_CONTENT.into_response()))
         }
     }
 
+    /// 构造带平台权限的测试引擎和主体。
     fn platform_engine() -> (PlatformEngine<MemoryPlatformSource>, PlatformSubject) {
         let source = MemoryPlatformSource::new();
         let subject = PlatformAuthContext::new(

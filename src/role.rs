@@ -1,18 +1,18 @@
 use crate::ids::RoleId;
 use crate::scope::GrantScope;
 
-/// A role assignment together with its explicit grant scope.
+/// 角色分配及其显式授权范围。
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RoleAssignment {
-    /// Assigned role.
+    /// 被分配的角色。
     pub role: RoleId,
-    /// Scope granted by this assignment.
+    /// 该分配授予的范围。
     pub scope: GrantScope,
 }
 
 impl RoleAssignment {
-    /// Creates a role assignment.
+    /// 创建角色分配。
     pub fn new(role: RoleId, scope: GrantScope) -> Self {
         Self { role, scope }
     }

@@ -5,55 +5,55 @@ use crate::request::AuthSubject;
 use crate::role::RoleAssignment;
 use async_trait::async_trait;
 
-/// Tenant status used by authorization.
+/// 授权使用的租户状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TenantStatus {
-    /// Tenant can participate in authorization.
+    /// 租户可以参与授权。
     Active,
-    /// Tenant is missing, disabled, or otherwise not usable.
+    /// 租户不存在、被禁用或不可用。
     Inactive,
 }
 
-/// Principal membership status within a tenant.
+/// 主体在租户内的成员关系状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MembershipStatus {
-    /// Principal can participate in tenant authorization.
+    /// 主体可以参与租户授权。
     Active,
-    /// Principal is missing, disabled, or otherwise not usable.
+    /// 主体不存在、被禁用或不可用。
     Inactive,
 }
 
-/// Read-only authorization data source.
+/// 只读授权数据源。
 #[async_trait]
 pub trait AuthorizationSource: Send + Sync {
-    /// Returns tenant status.
+    /// 返回租户状态。
     async fn tenant_status(
         &self,
         tenant: &TenantId,
     ) -> std::result::Result<TenantStatus, SourceError>;
 
-    /// Returns principal membership status.
+    /// 返回主体成员关系状态。
     async fn membership_status(
         &self,
         subject: &AuthSubject,
     ) -> std::result::Result<MembershipStatus, SourceError>;
 
-    /// Returns scoped role assignments for the subject.
+    /// 返回主体的带范围角色分配。
     async fn role_assignments(
         &self,
         subject: &AuthSubject,
     ) -> std::result::Result<Vec<RoleAssignment>, SourceError>;
 
-    /// Returns permissions bound to a tenant role.
+    /// 返回绑定到租户角色的权限。
     async fn role_permissions(
         &self,
         tenant: &TenantId,
         role: &RoleId,
     ) -> std::result::Result<Vec<Permission>, SourceError>;
 
-    /// Returns direct parent roles for role inheritance.
+    /// 返回用于角色继承的直接父角色。
     async fn parent_roles(
         &self,
         tenant: &TenantId,

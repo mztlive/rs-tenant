@@ -6,14 +6,14 @@ use super::{
 use crate::{AccessDecision, Error, Permission, Result};
 use std::collections::HashSet;
 
-/// Platform engine behavior configuration.
+/// 平台引擎行为配置。
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PlatformEngineConfig {
-    /// Enables platform role inheritance traversal.
+    /// 是否启用平台角色继承遍历。
     pub enable_role_hierarchy: bool,
-    /// Enables complete resource/action wildcard matching.
+    /// 是否启用完整资源/动作通配符匹配。
     pub enable_wildcard: bool,
-    /// Maximum platform role inheritance depth.
+    /// 最大平台角色继承深度。
     pub max_role_depth: usize,
 }
 
@@ -27,21 +27,21 @@ impl Default for PlatformEngineConfig {
     }
 }
 
-/// Platform authorization engine.
+/// 平台授权引擎。
 #[derive(Debug)]
 pub struct PlatformEngine<S> {
     source: S,
     config: PlatformEngineConfig,
 }
 
-/// Builder for [`PlatformEngine`].
+/// [`PlatformEngine`] 构造器。
 pub struct PlatformEngineBuilder<S> {
     source: S,
     config: PlatformEngineConfig,
 }
 
 impl<S> PlatformEngineBuilder<S> {
-    /// Creates a builder using default configuration.
+    /// 使用默认配置创建构造器。
     pub fn new(source: S) -> Self {
         Self {
             source,
@@ -49,31 +49,31 @@ impl<S> PlatformEngineBuilder<S> {
         }
     }
 
-    /// Replaces the full platform engine configuration.
+    /// 替换完整平台引擎配置。
     pub fn config(mut self, config: PlatformEngineConfig) -> Self {
         self.config = config;
         self
     }
 
-    /// Enables or disables platform role inheritance.
+    /// 启用或禁用平台角色继承。
     pub fn enable_role_hierarchy(mut self, on: bool) -> Self {
         self.config.enable_role_hierarchy = on;
         self
     }
 
-    /// Enables or disables wildcard matching.
+    /// 启用或禁用通配符匹配。
     pub fn enable_wildcard(mut self, on: bool) -> Self {
         self.config.enable_wildcard = on;
         self
     }
 
-    /// Sets maximum platform role inheritance depth.
+    /// 设置最大平台角色继承深度。
     pub fn max_role_depth(mut self, depth: usize) -> Self {
         self.config.max_role_depth = depth;
         self
     }
 
-    /// Builds the platform engine.
+    /// 构建平台引擎。
     pub fn build(self) -> PlatformEngine<S> {
         PlatformEngine {
             source: self.source,
@@ -86,12 +86,12 @@ impl<S> PlatformEngine<S>
 where
     S: PlatformAuthorizationSource,
 {
-    /// Returns the current platform engine configuration.
+    /// 返回当前平台引擎配置。
     pub fn config(&self) -> &PlatformEngineConfig {
         &self.config
     }
 
-    /// Checks whether a platform principal can access a platform-owned resource.
+    /// 检查平台主体是否可以访问平台自有资源。
     pub async fn can_platform(&self, request: PlatformAccessRequest) -> Result<AccessDecision> {
         let grants = self
             .matching_grants(&request.subject, &request.permission)
@@ -102,7 +102,7 @@ where
         Ok(decision(allowed))
     }
 
-    /// Computes the accessible tenant data scope for a platform permission.
+    /// 计算平台权限可访问的租户数据范围。
     pub async fn accessible_tenants(
         &self,
         query: TenantDataScopeQuery,
@@ -113,7 +113,7 @@ where
         TenantDataAccessScope::merge(grants.into_iter().map(|grant| grant.scope))
     }
 
-    /// Checks tenant-level data access for a platform principal.
+    /// 检查平台主体的租户级数据访问权。
     pub async fn can_access_tenant(
         &self,
         request: TenantDataAccessRequest,
@@ -127,7 +127,7 @@ where
         Ok(decision(scope.allows_tenant(&request.tenant)))
     }
 
-    /// Checks tenant path data access for a platform principal.
+    /// 检查平台主体的租户路径数据访问权。
     pub async fn can_access_tenant_scope(
         &self,
         request: TenantScopedDataAccessRequest,
@@ -143,6 +143,7 @@ where
         ))
     }
 
+    /// 过滤出主体拥有且匹配所需权限的有效授权。
     async fn matching_grants(
         &self,
         subject: &PlatformSubject,
@@ -164,6 +165,7 @@ where
             .collect())
     }
 
+    /// 计算平台主体在当前配置下的有效授权。
     async fn effective_grants(
         &self,
         subject: &PlatformSubject,
@@ -192,6 +194,7 @@ where
         Ok(grants)
     }
 
+    /// 展开平台角色及其继承链上的父角色。
     async fn expand_roles(&self, root: PlatformRoleId) -> Result<Vec<PlatformRoleId>> {
         let mut visited = HashSet::new();
         let mut visiting = HashSet::new();
@@ -201,6 +204,7 @@ where
         Ok(output)
     }
 
+    /// 以显式栈遍历平台角色继承图，同时检测环和深度限制。
     async fn expand_from(
         &self,
         root: PlatformRoleId,
@@ -246,12 +250,14 @@ where
     }
 }
 
+/// 平台引擎内部计算出的有效授权。
 #[derive(Clone, Debug)]
 struct PlatformEffectiveGrant {
     permission: Permission,
     scope: PlatformGrantScope,
 }
 
+/// 将布尔允许结果转换为访问决策。
 fn decision(allowed: bool) -> AccessDecision {
     if allowed {
         AccessDecision::Allow
@@ -267,24 +273,29 @@ mod tests {
     use crate::{Permission, ScopePath, ScopeRoots, TenantId};
     use futures::executor::block_on;
 
+    /// 构造平台管理员测试主体。
     fn principal() -> super::PlatformSubject {
         super::PlatformSubject::new(
             crate::platform::PlatformPrincipalId::parse("platform_admin").expect("principal"),
         )
     }
 
+    /// 解析测试平台角色标识符。
     fn role(value: &str) -> PlatformRoleId {
         PlatformRoleId::parse(value).expect("role")
     }
 
+    /// 解析测试租户标识符。
     fn tenant(value: &str) -> TenantId {
         TenantId::parse(value).expect("tenant")
     }
 
+    /// 解析测试范围路径。
     fn path(value: &str) -> ScopePath {
         ScopePath::parse(value).expect("path")
     }
 
+    /// 构造已激活平台主体和角色授权的测试数据源。
     fn active_source(
         scope: PlatformGrantScope,
         permission: &str,

@@ -11,7 +11,7 @@ use crate::ids::{PrincipalId, RoleId, TenantId};
 const SMALL_CACHE_SHARD_THRESHOLD: usize = 128;
 const MAX_DEFAULT_SHARDS: usize = 16;
 
-/// In-memory cache for effective grants.
+/// 有效授权的内存缓存。
 #[derive(Debug, Clone)]
 pub struct MemoryCache {
     shards: Arc<Vec<RwLock<CacheState>>>,
@@ -21,12 +21,14 @@ pub struct MemoryCache {
     ttl: Option<Duration>,
 }
 
+/// 单个分片内的缓存状态。
 #[derive(Debug, Default)]
 struct CacheState {
     entries: HashMap<CacheKey, CacheEntry>,
     order: VecDeque<CacheKey>,
 }
 
+/// 缓存条目的唯一键。
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct CacheKey {
     tenant: TenantId,
@@ -34,6 +36,7 @@ struct CacheKey {
     config_signature: String,
 }
 
+/// 缓存条目及其更新时间。
 #[derive(Debug, Clone)]
 struct CacheEntry {
     grants: Vec<EffectiveGrant>,
@@ -41,15 +44,15 @@ struct CacheEntry {
 }
 
 impl MemoryCache {
-    /// Creates a new cache with the given capacity.
+    /// 使用给定容量创建缓存。
     ///
-    /// A capacity of zero disables caching.
+    /// 容量为零时禁用缓存。
     pub fn new(capacity: usize) -> Self {
         let shard_count = Self::default_shard_count(capacity);
         Self::build(capacity, shard_count)
     }
 
-    /// Overrides shard count for lock sharding.
+    /// 覆盖用于锁分片的分片数量。
     pub fn with_shards(mut self, shards: usize) -> Self {
         let shard_count = Self::normalize_shards(self.capacity, shards);
         self.shards = Arc::new(Self::new_shards(shard_count));
@@ -58,12 +61,13 @@ impl MemoryCache {
         self
     }
 
-    /// Configures a time-to-live for cache entries.
+    /// 配置缓存条目的存活时间。
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
     }
 
+    /// 使用容量和分片数量构建缓存实例。
     fn build(capacity: usize, shard_count: usize) -> Self {
         Self {
             shards: Arc::new(Self::new_shards(shard_count)),
@@ -74,6 +78,7 @@ impl MemoryCache {
         }
     }
 
+    /// 根据容量和系统并行度选择默认分片数量。
     fn default_shard_count(capacity: usize) -> usize {
         if capacity < SMALL_CACHE_SHARD_THRESHOLD {
             return 1;
@@ -85,6 +90,7 @@ impl MemoryCache {
         Self::normalize_shards(capacity, cpu_shards)
     }
 
+    /// 将请求的分片数量规整到有效范围。
     fn normalize_shards(capacity: usize, requested: usize) -> usize {
         if capacity == 0 {
             return 1;
@@ -92,12 +98,14 @@ impl MemoryCache {
         requested.max(1).min(capacity)
     }
 
+    /// 创建指定数量的缓存分片。
     fn new_shards(shard_count: usize) -> Vec<RwLock<CacheState>> {
         (0..shard_count)
             .map(|_| RwLock::new(CacheState::default()))
             .collect()
     }
 
+    /// 按总容量计算每个分片的容量。
     fn shard_capacities(capacity: usize, shard_count: usize) -> Vec<usize> {
         let base = capacity / shard_count;
         let remainder = capacity % shard_count;
@@ -106,6 +114,7 @@ impl MemoryCache {
             .collect()
     }
 
+    /// 构造缓存键。
     fn key(tenant: &TenantId, principal: &PrincipalId, config_signature: &str) -> CacheKey {
         CacheKey {
             tenant: tenant.clone(),
@@ -114,12 +123,14 @@ impl MemoryCache {
         }
     }
 
+    /// 根据缓存键定位分片下标。
     fn shard_index(&self, key: &CacheKey) -> usize {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
         (hasher.finish() as usize) % self.shard_count
     }
 
+    /// 读取指定分片，并在锁中毒时恢复内部值。
     fn read_shard(&self, shard_index: usize) -> RwLockReadGuard<'_, CacheState> {
         match self.shards[shard_index].read() {
             Ok(guard) => guard,
@@ -127,6 +138,7 @@ impl MemoryCache {
         }
     }
 
+    /// 写入指定分片，并在锁中毒时恢复内部值。
     fn write_shard(&self, shard_index: usize) -> RwLockWriteGuard<'_, CacheState> {
         match self.shards[shard_index].write() {
             Ok(guard) => guard,
@@ -134,12 +146,14 @@ impl MemoryCache {
         }
     }
 
+    /// 从状态中删除指定缓存键及其 LRU 顺序记录。
     fn remove_key(state: &mut CacheState, key: &CacheKey) {
         if state.entries.remove(key).is_some() {
             state.order.retain(|existing| existing != key);
         }
     }
 
+    /// 将缓存键移动到 LRU 队列尾部。
     fn touch(state: &mut CacheState, key: &CacheKey) {
         if state.order.back().is_some_and(|last| last == key) {
             return;
@@ -148,10 +162,12 @@ impl MemoryCache {
         state.order.push_back(key.clone());
     }
 
+    /// 判断缓存条目是否超过存活时间。
     fn is_expired(entry: &CacheEntry, ttl: Duration, now: Instant) -> bool {
         now.saturating_duration_since(entry.updated_at) > ttl
     }
 
+    /// 清理已经过期的缓存条目。
     fn prune_expired(state: &mut CacheState, ttl: Duration, now: Instant) {
         state
             .entries
@@ -159,6 +175,7 @@ impl MemoryCache {
         state.order.retain(|key| state.entries.contains_key(key));
     }
 
+    /// 在分片容量超限时淘汰最久未使用条目。
     fn evict_if_needed(state: &mut CacheState, shard_capacity: usize) {
         if shard_capacity == 0 {
             state.entries.clear();
@@ -174,6 +191,7 @@ impl MemoryCache {
         }
     }
 
+    /// 删除某个租户下的所有缓存条目。
     fn remove_tenant_entries(state: &mut CacheState, tenant: &TenantId) {
         state.entries.retain(|key, _| &key.tenant != tenant);
         state.order.retain(|key| state.entries.contains_key(key));
@@ -182,6 +200,7 @@ impl MemoryCache {
 
 #[async_trait]
 impl Cache for MemoryCache {
+    /// 从缓存读取有效授权，并在必要时刷新 LRU 顺序。
     async fn get_effective_grants(
         &self,
         tenant: &TenantId,
@@ -201,7 +220,7 @@ impl Cache for MemoryCache {
                 if let Some(ttl) = self.ttl
                     && Self::is_expired(entry, ttl, now)
                 {
-                    // A write lock below removes the expired entry.
+                    // 下方的写锁会删除过期条目。
                 } else if guard.order.back().is_some_and(|last| last == &key) {
                     return Some(entry.grants.clone());
                 }
@@ -225,6 +244,7 @@ impl Cache for MemoryCache {
         grants
     }
 
+    /// 写入有效授权并按分片容量执行淘汰。
     async fn set_effective_grants(
         &self,
         tenant: &TenantId,
@@ -256,6 +276,7 @@ impl Cache for MemoryCache {
         Self::evict_if_needed(&mut guard, self.shard_capacities[shard_index]);
     }
 
+    /// 失效某个租户主体的所有缓存条目。
     async fn invalidate_principal(&self, tenant: &TenantId, principal: &PrincipalId) {
         for shard_index in 0..self.shard_count {
             let mut guard = self.write_shard(shard_index);
@@ -272,10 +293,12 @@ impl Cache for MemoryCache {
         }
     }
 
+    /// 角色级缓存失效退化为租户级缓存失效。
     async fn invalidate_role(&self, tenant: &TenantId, _role: &RoleId) {
         self.invalidate_tenant(tenant).await;
     }
 
+    /// 失效某个租户的所有缓存条目。
     async fn invalidate_tenant(&self, tenant: &TenantId) {
         for shard_index in 0..self.shard_count {
             let mut guard = self.write_shard(shard_index);
@@ -283,6 +306,7 @@ impl Cache for MemoryCache {
         }
     }
 
+    /// 清空所有分片中的缓存条目。
     async fn invalidate_all(&self) {
         for shard_index in 0..self.shard_count {
             let mut guard = self.write_shard(shard_index);
@@ -300,6 +324,7 @@ mod tests {
     use futures::executor::block_on;
     use std::time::Duration;
 
+    /// 按后缀构造测试标识符。
     fn ids(suffix: &str) -> (TenantId, PrincipalId, RoleId) {
         (
             TenantId::parse(format!("tenant_{suffix}")).expect("tenant"),
@@ -308,6 +333,7 @@ mod tests {
         )
     }
 
+    /// 构造租户级测试授权。
     fn grant(role: RoleId, permission: &str) -> EffectiveGrant {
         EffectiveGrant::new(
             role,

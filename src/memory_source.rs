@@ -8,12 +8,13 @@ use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-/// In-memory authorization source for tests and demos.
+/// 用于测试和演示的内存授权数据源。
 #[derive(Debug, Default, Clone)]
 pub struct MemorySource {
     inner: Arc<Inner>,
 }
 
+/// 内存数据源的共享内部状态。
 #[derive(Debug, Default)]
 struct Inner {
     tenants: RwLock<HashMap<TenantId, TenantStatus>>,
@@ -23,6 +24,7 @@ struct Inner {
     parent_roles: RwLock<HashMap<TenantId, HashMap<RoleId, HashSet<RoleId>>>>,
 }
 
+/// 获取读锁，并在锁中毒时恢复内部值。
 fn read_guard<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     match lock.read() {
         Ok(guard) => guard,
@@ -30,6 +32,7 @@ fn read_guard<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     }
 }
 
+/// 获取写锁，并在锁中毒时恢复内部值。
 fn write_guard<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     match lock.write() {
         Ok(guard) => guard,
@@ -38,17 +41,17 @@ fn write_guard<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 }
 
 impl MemorySource {
-    /// Creates an empty source.
+    /// 创建空数据源。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Sets tenant status.
+    /// 设置租户状态。
     pub fn set_tenant_status(&self, tenant: TenantId, status: TenantStatus) {
         write_guard(&self.inner.tenants).insert(tenant, status);
     }
 
-    /// Sets membership status.
+    /// 设置主体成员关系状态。
     pub fn set_membership_status(
         &self,
         tenant: TenantId,
@@ -61,7 +64,7 @@ impl MemorySource {
             .insert(principal, status);
     }
 
-    /// Adds a scoped role assignment.
+    /// 添加带范围的角色分配。
     pub fn add_role_assignment(
         &self,
         tenant: TenantId,
@@ -77,7 +80,7 @@ impl MemorySource {
             .push(RoleAssignment::new(role, scope));
     }
 
-    /// Adds a permission to a role.
+    /// 为角色添加权限。
     pub fn add_role_permission(&self, tenant: TenantId, role: RoleId, permission: Permission) {
         write_guard(&self.inner.role_permissions)
             .entry(tenant)
@@ -87,7 +90,7 @@ impl MemorySource {
             .insert(permission);
     }
 
-    /// Adds a direct parent role.
+    /// 添加直接父角色。
     pub fn add_parent_role(&self, tenant: TenantId, role: RoleId, parent: RoleId) {
         write_guard(&self.inner.parent_roles)
             .entry(tenant)
@@ -100,6 +103,7 @@ impl MemorySource {
 
 #[async_trait]
 impl AuthorizationSource for MemorySource {
+    /// 查询租户状态，未配置时默认为未激活。
     async fn tenant_status(
         &self,
         tenant: &TenantId,
@@ -110,6 +114,7 @@ impl AuthorizationSource for MemorySource {
             .unwrap_or(TenantStatus::Inactive))
     }
 
+    /// 查询主体成员关系状态，未配置时默认为未激活。
     async fn membership_status(
         &self,
         subject: &AuthSubject,
@@ -121,6 +126,7 @@ impl AuthorizationSource for MemorySource {
             .unwrap_or(MembershipStatus::Inactive))
     }
 
+    /// 查询主体的角色分配。
     async fn role_assignments(
         &self,
         subject: &AuthSubject,
@@ -132,6 +138,7 @@ impl AuthorizationSource for MemorySource {
             .unwrap_or_default())
     }
 
+    /// 查询角色拥有的权限集合。
     async fn role_permissions(
         &self,
         tenant: &TenantId,
@@ -144,6 +151,7 @@ impl AuthorizationSource for MemorySource {
             .unwrap_or_default())
     }
 
+    /// 查询角色的直接父角色集合。
     async fn parent_roles(
         &self,
         tenant: &TenantId,

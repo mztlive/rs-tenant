@@ -1,17 +1,17 @@
 use super::{PlatformGrantScope, PlatformRoleId};
 
-/// A platform role assignment together with its explicit grant scope.
+/// 平台角色分配及其显式授权范围。
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PlatformRoleAssignment {
-    /// Assigned platform role.
+    /// 被分配的平台角色。
     pub role: PlatformRoleId,
-    /// Scope granted by this platform assignment.
+    /// 该平台分配授予的范围。
     pub scope: PlatformGrantScope,
 }
 
 impl PlatformRoleAssignment {
-    /// Creates a platform role assignment.
+    /// 创建平台角色分配。
     pub fn new(role: PlatformRoleId, scope: PlatformGrantScope) -> Self {
         Self { role, scope }
     }

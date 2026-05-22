@@ -7,14 +7,14 @@ use crate::scope::AccessScope;
 use crate::source::{AuthorizationSource, MembershipStatus, TenantStatus};
 use std::collections::HashSet;
 
-/// Engine behavior configuration.
+/// 引擎行为配置。
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct EngineConfig {
-    /// Enables role inheritance traversal through [`AuthorizationSource::parent_roles`].
+    /// 是否通过 [`AuthorizationSource::parent_roles`] 启用角色继承遍历。
     pub enable_role_hierarchy: bool,
-    /// Enables complete resource/action wildcard matching.
+    /// 是否启用完整资源/动作通配符匹配。
     pub enable_wildcard: bool,
-    /// Maximum role inheritance depth.
+    /// 最大角色继承深度。
     pub max_role_depth: usize,
 }
 
@@ -29,6 +29,7 @@ impl Default for EngineConfig {
 }
 
 impl EngineConfig {
+    /// 生成用于区分缓存条目的配置签名。
     fn signature(&self) -> String {
         format!(
             "rh:{};wc:{};depth:{}",
@@ -39,7 +40,7 @@ impl EngineConfig {
     }
 }
 
-/// Tenant RBAC authorization engine.
+/// 租户 RBAC 授权引擎。
 #[derive(Debug)]
 pub struct Engine<S, C = NoCache> {
     source: S,
@@ -48,7 +49,7 @@ pub struct Engine<S, C = NoCache> {
     config_signature: String,
 }
 
-/// Builder for [`Engine`].
+/// [`Engine`] 构造器。
 pub struct EngineBuilder<S, C = NoCache> {
     source: S,
     cache: C,
@@ -56,7 +57,7 @@ pub struct EngineBuilder<S, C = NoCache> {
 }
 
 impl<S> EngineBuilder<S, NoCache> {
-    /// Creates a builder using default configuration and no cache.
+    /// 使用默认配置和空缓存创建构造器。
     pub fn new(source: S) -> Self {
         Self {
             source,
@@ -67,31 +68,31 @@ impl<S> EngineBuilder<S, NoCache> {
 }
 
 impl<S, C> EngineBuilder<S, C> {
-    /// Replaces the full engine configuration.
+    /// 替换完整引擎配置。
     pub fn config(mut self, config: EngineConfig) -> Self {
         self.config = config;
         self
     }
 
-    /// Enables or disables role inheritance.
+    /// 启用或禁用角色继承。
     pub fn enable_role_hierarchy(mut self, on: bool) -> Self {
         self.config.enable_role_hierarchy = on;
         self
     }
 
-    /// Enables or disables wildcard matching.
+    /// 启用或禁用通配符匹配。
     pub fn enable_wildcard(mut self, on: bool) -> Self {
         self.config.enable_wildcard = on;
         self
     }
 
-    /// Sets maximum role inheritance depth.
+    /// 设置最大角色继承深度。
     pub fn max_role_depth(mut self, depth: usize) -> Self {
         self.config.max_role_depth = depth;
         self
     }
 
-    /// Sets the cache implementation.
+    /// 设置缓存实现。
     pub fn cache<C2: Cache>(self, cache: C2) -> EngineBuilder<S, C2> {
         EngineBuilder {
             source: self.source,
@@ -100,7 +101,7 @@ impl<S, C> EngineBuilder<S, C> {
         }
     }
 
-    /// Builds the engine.
+    /// 构建引擎。
     pub fn build(self) -> Engine<S, C> {
         let config_signature = self.config.signature();
         Engine {
@@ -117,28 +118,28 @@ where
     S: AuthorizationSource,
     C: Cache,
 {
-    /// Returns the current engine configuration.
+    /// 返回当前引擎配置。
     pub fn config(&self) -> &EngineConfig {
         &self.config
     }
 
-    /// Computes the accessible data scope for a permission.
+    /// 计算某个权限可访问的数据范围。
     pub async fn accessible_scope(&self, query: ScopeQuery) -> Result<AccessScope> {
         let (scope, _) = self.resolve_scope(query).await?;
         Ok(scope)
     }
 
-    /// Checks whether a subject can access a target scope path.
+    /// 检查主体是否可以访问目标范围路径。
     pub async fn can_access_scope(&self, request: ScopedAccessRequest) -> Result<AccessDecision> {
         Ok(self.explain_access_scope(request).await?.decision)
     }
 
-    /// Checks whether a subject has tenant-wide access.
+    /// 检查主体是否拥有租户级访问权。
     pub async fn can_tenant(&self, request: TenantAccessRequest) -> Result<AccessDecision> {
         Ok(self.explain_tenant(request).await?.decision)
     }
 
-    /// Explains a target path access check.
+    /// 解释目标路径访问检查结果。
     pub async fn explain_access_scope(
         &self,
         request: ScopedAccessRequest,
@@ -166,7 +167,7 @@ where
         })
     }
 
-    /// Explains a tenant-level access check.
+    /// 解释租户级访问检查结果。
     pub async fn explain_tenant(&self, request: TenantAccessRequest) -> Result<AccessExplanation> {
         let query = ScopeQuery {
             subject: request.subject,
@@ -190,26 +191,27 @@ where
         })
     }
 
-    /// Invalidates grants cached for a principal.
+    /// 失效某个主体的缓存授权。
     pub async fn invalidate_principal(&self, tenant: &TenantId, principal: &PrincipalId) {
         self.cache.invalidate_principal(tenant, principal).await;
     }
 
-    /// Invalidates grants cached for a role.
+    /// 失效某个角色的缓存授权。
     pub async fn invalidate_role(&self, tenant: &TenantId, role: &RoleId) {
         self.cache.invalidate_role(tenant, role).await;
     }
 
-    /// Invalidates grants cached for a tenant.
+    /// 失效某个租户的缓存授权。
     pub async fn invalidate_tenant(&self, tenant: &TenantId) {
         self.cache.invalidate_tenant(tenant).await;
     }
 
-    /// Invalidates all cached grants.
+    /// 失效所有缓存授权。
     pub async fn invalidate_all(&self) {
         self.cache.invalidate_all().await;
     }
 
+    /// 解析权限查询对应的最终访问范围和拒绝原因。
     async fn resolve_scope(&self, query: ScopeQuery) -> Result<(AccessScope, Option<DenyReason>)> {
         let tenant = query.subject.tenant.clone();
         if self.source.tenant_status(&tenant).await? != TenantStatus::Active {
@@ -236,6 +238,7 @@ where
         Ok((scope, reason))
     }
 
+    /// 读取或计算主体在当前引擎配置下的有效授权。
     async fn effective_grants(&self, subject: &AuthSubject) -> Result<Vec<EffectiveGrant>> {
         if let Some(grants) = self
             .cache
@@ -274,6 +277,7 @@ where
         Ok(grants)
     }
 
+    /// 展开角色及其继承链上的父角色。
     async fn expand_roles(&self, tenant: &TenantId, root: RoleId) -> Result<Vec<RoleId>> {
         let mut visited = HashSet::new();
         let mut visiting = HashSet::new();
@@ -283,6 +287,7 @@ where
         Ok(output)
     }
 
+    /// 以显式栈遍历角色继承图，同时检测环和深度限制。
     async fn expand_from(
         &self,
         tenant: &TenantId,
@@ -340,6 +345,7 @@ mod tests {
     use crate::{GrantScope, MembershipStatus, Permission, ScopePath, TenantStatus};
     use futures::executor::block_on;
 
+    /// 构造一组通用测试标识符。
     fn ids() -> (TenantId, PrincipalId, RoleId) {
         (
             TenantId::parse("tenant_1").expect("tenant"),
@@ -348,6 +354,7 @@ mod tests {
         )
     }
 
+    /// 构造已激活租户、成员关系和角色授权的测试数据源。
     fn active_source(scope: GrantScope, permission: &str) -> (MemorySource, AuthSubject) {
         let (tenant, principal, role) = ids();
         let source = MemorySource::new();

@@ -14,6 +14,7 @@ use rs_tenant::{
 use std::hint::black_box;
 use std::time::Duration;
 
+/// 构造路径级访问基准测试使用的扁平授权数据源。
 fn setup_flat_source() -> (MemorySource, AuthSubject, Permission, ScopePath) {
     let source = MemorySource::new();
     let tenant = TenantId::parse("tenant_bench").unwrap();
@@ -40,6 +41,7 @@ fn setup_flat_source() -> (MemorySource, AuthSubject, Permission, ScopePath) {
     )
 }
 
+/// 构造租户级访问基准测试使用的数据源。
 fn setup_tenant_source() -> (MemorySource, AuthSubject, Permission) {
     let (source, subject, permission, _) = setup_flat_source();
     let role = RoleId::parse("tenant_admin").unwrap();
@@ -53,6 +55,7 @@ fn setup_tenant_source() -> (MemorySource, AuthSubject, Permission) {
     (source, subject, permission)
 }
 
+/// 构造角色继承深度基准测试使用的数据源。
 fn setup_hierarchy_source(depth: usize) -> (MemorySource, AuthSubject, Permission, ScopePath) {
     let source = MemorySource::new();
     let tenant = TenantId::parse("tenant_hierarchy_bench").unwrap();
@@ -88,6 +91,7 @@ fn setup_hierarchy_source(depth: usize) -> (MemorySource, AuthSubject, Permissio
     )
 }
 
+/// 构造多角色扇出基准测试使用的数据源。
 fn setup_role_fanout_source(role_count: usize) -> (MemorySource, AuthSubject, Permission) {
     let source = MemorySource::new();
     let tenant = TenantId::parse("tenant_fanout_bench").unwrap();
@@ -112,6 +116,7 @@ fn setup_role_fanout_source(role_count: usize) -> (MemorySource, AuthSubject, Pe
     (source, AuthSubject::new(tenant, principal), required)
 }
 
+/// 执行扁平授权和缓存命中的基准测试。
 fn bench_flat(c: &mut Criterion) {
     let mut group = c.benchmark_group("v03_flat_access");
     group.sample_size(30);
@@ -153,6 +158,7 @@ fn bench_flat(c: &mut Criterion) {
     group.finish();
 }
 
+/// 执行不同角色继承深度的基准测试。
 fn bench_hierarchy_depth(c: &mut Criterion) {
     let mut group = c.benchmark_group("v03_hierarchy_depth");
     group.sample_size(30);
@@ -181,6 +187,7 @@ fn bench_hierarchy_depth(c: &mut Criterion) {
     group.finish();
 }
 
+/// 执行不同角色数量扇出的基准测试。
 fn bench_role_fanout(c: &mut Criterion) {
     let mut group = c.benchmark_group("v03_role_fanout");
     group.sample_size(30);
