@@ -3,8 +3,10 @@ use super::{
     PlatformPrincipalStatus, PlatformRoleId, PlatformSubject, TenantDataAccessRequest,
     TenantDataAccessScope, TenantDataScopeQuery, TenantScopedDataAccessRequest,
 };
+use crate::grant::ScopedGrant;
+use crate::role_hierarchy::{RoleHierarchy, expand_roles};
 use crate::{AccessDecision, Error, Permission, Result};
-use std::collections::HashSet;
+use async_trait::async_trait;
 
 /// 平台引擎行为配置。
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -157,11 +159,7 @@ where
         let grants = self.effective_grants(subject).await?;
         Ok(grants
             .into_iter()
-            .filter(|grant| {
-                grant
-                    .permission
-                    .matches(required, self.config.enable_wildcard)
-            })
+            .filter(|grant| grant.matches_permission(required, self.config.enable_wildcard))
             .collect())
     }
 
@@ -174,88 +172,60 @@ where
         let mut grants = Vec::new();
         for assignment in assignments {
             let roles = if self.config.enable_role_hierarchy {
-                self.expand_roles(assignment.role.clone()).await?
+                let hierarchy = PlatformRoleHierarchy { engine: self };
+                expand_roles(&hierarchy, assignment.role.clone()).await?
             } else {
                 vec![assignment.role]
             };
 
             for role in roles {
                 let permissions = self.source.platform_role_permissions(&role).await?;
-                grants.extend(
-                    permissions
-                        .into_iter()
-                        .map(|permission| PlatformEffectiveGrant {
-                            permission,
-                            scope: assignment.scope.clone(),
-                        }),
-                );
+                grants.extend(permissions.into_iter().map(|permission| {
+                    PlatformEffectiveGrant::new(role.clone(), permission, assignment.scope.clone())
+                }));
             }
         }
         Ok(grants)
     }
+}
 
-    /// 展开平台角色及其继承链上的父角色。
-    async fn expand_roles(&self, root: PlatformRoleId) -> Result<Vec<PlatformRoleId>> {
-        let mut visited = HashSet::new();
-        let mut visiting = HashSet::new();
-        let mut output = Vec::new();
-        self.expand_from(root, &mut visited, &mut visiting, &mut output)
-            .await?;
-        Ok(output)
+struct PlatformRoleHierarchy<'a, S> {
+    engine: &'a PlatformEngine<S>,
+}
+
+#[async_trait]
+impl<S> RoleHierarchy for PlatformRoleHierarchy<'_, S>
+where
+    S: PlatformAuthorizationSource,
+{
+    type Role = PlatformRoleId;
+
+    async fn parent_roles(&self, role: &Self::Role) -> Result<Vec<Self::Role>> {
+        self.engine
+            .source
+            .platform_parent_roles(role)
+            .await
+            .map_err(Error::from)
     }
 
-    /// 以显式栈遍历平台角色继承图，同时检测环和深度限制。
-    async fn expand_from(
-        &self,
-        root: PlatformRoleId,
-        visited: &mut HashSet<PlatformRoleId>,
-        visiting: &mut HashSet<PlatformRoleId>,
-        output: &mut Vec<PlatformRoleId>,
-    ) -> Result<()> {
-        visiting.insert(root.clone());
-        output.push(root.clone());
-        let parents = self.source.platform_parent_roles(&root).await?;
-        let mut stack: Vec<(PlatformRoleId, usize, std::vec::IntoIter<PlatformRoleId>)> =
-            vec![(root, 0, parents.into_iter())];
+    fn max_depth(&self) -> usize {
+        self.engine.config.max_role_depth
+    }
 
-        while let Some((current, depth, mut iter)) = stack.pop() {
-            if let Some(parent) = iter.next() {
-                stack.push((current.clone(), depth, iter));
-                let next_depth = depth + 1;
-                if next_depth > self.config.max_role_depth {
-                    return Err(Error::PlatformRoleDepthExceeded {
-                        role: parent,
-                        max_depth: self.config.max_role_depth,
-                    });
-                }
-                if visiting.contains(&parent) {
-                    return Err(Error::PlatformRoleCycleDetected { role: parent });
-                }
-                if visited.contains(&parent) {
-                    continue;
-                }
+    fn cycle_error(&self, role: Self::Role) -> Error {
+        Error::PlatformRoleCycleDetected { role }
+    }
 
-                let parents = self.source.platform_parent_roles(&parent).await?;
-                visiting.insert(parent.clone());
-                output.push(parent.clone());
-                stack.push((parent, next_depth, parents.into_iter()));
-                continue;
-            }
-
-            visiting.remove(&current);
-            visited.insert(current);
+    fn depth_error(&self, role: Self::Role) -> Error {
+        Error::PlatformRoleDepthExceeded {
+            role,
+            max_depth: self.engine.config.max_role_depth,
         }
-
-        Ok(())
     }
 }
 
 /// 平台引擎内部计算出的有效授权。
-#[derive(Clone, Debug)]
-struct PlatformEffectiveGrant {
-    permission: Permission,
-    scope: PlatformGrantScope,
-}
+type PlatformEffectiveGrant = ScopedGrant<PlatformRoleId, PlatformGrantScope>;
 
 /// 将布尔允许结果转换为访问决策。
 fn decision(allowed: bool) -> AccessDecision {

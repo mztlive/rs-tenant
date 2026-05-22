@@ -1,30 +1,11 @@
+use crate::grant::ScopedGrant;
 use crate::ids::{PrincipalId, RoleId, TenantId};
-use crate::permission::Permission;
 use crate::scope::GrantScope;
 use async_trait::async_trait;
 
 /// 按租户主体和引擎配置缓存的内部有效授权。
 #[doc(hidden)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EffectiveGrant {
-    /// 读取到权限的来源角色。
-    pub role: RoleId,
-    /// 角色授予的权限。
-    pub permission: Permission,
-    /// 原始角色分配附带的范围。
-    pub scope: GrantScope,
-}
-
-impl EffectiveGrant {
-    /// 创建有效授权。
-    pub fn new(role: RoleId, permission: Permission, scope: GrantScope) -> Self {
-        Self {
-            role,
-            permission,
-            scope,
-        }
-    }
-}
+pub type EffectiveGrant = ScopedGrant<RoleId, GrantScope>;
 
 /// 有效授权的缓存接口。
 #[async_trait]

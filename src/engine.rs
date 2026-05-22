@@ -3,9 +3,10 @@ use crate::decision::{AccessDecision, AccessExplanation, DenyReason};
 use crate::error::{Error, Result};
 use crate::ids::{PrincipalId, RoleId, TenantId};
 use crate::request::{AuthSubject, ScopeQuery, ScopedAccessRequest, TenantAccessRequest};
+use crate::role_hierarchy::{RoleHierarchy, expand_roles};
 use crate::scope::AccessScope;
 use crate::source::{AuthorizationSource, MembershipStatus, TenantStatus};
-use std::collections::HashSet;
+use async_trait::async_trait;
 
 /// 引擎行为配置。
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -225,9 +226,7 @@ where
         let matched_scopes = grants
             .into_iter()
             .filter(|grant| {
-                grant
-                    .permission
-                    .matches(&query.permission, self.config.enable_wildcard)
+                grant.matches_permission(&query.permission, self.config.enable_wildcard)
             })
             .map(|grant| grant.scope);
         let scope = AccessScope::merge(tenant, matched_scopes);
@@ -252,8 +251,11 @@ where
         let mut grants = Vec::new();
         for assignment in assignments {
             let roles = if self.config.enable_role_hierarchy {
-                self.expand_roles(&subject.tenant, assignment.role.clone())
-                    .await?
+                let hierarchy = TenantRoleHierarchy {
+                    engine: self,
+                    tenant: &subject.tenant,
+                };
+                expand_roles(&hierarchy, assignment.role.clone()).await?
             } else {
                 vec![assignment.role]
             };
@@ -276,65 +278,46 @@ where
             .await;
         Ok(grants)
     }
+}
 
-    /// 展开角色及其继承链上的父角色。
-    async fn expand_roles(&self, tenant: &TenantId, root: RoleId) -> Result<Vec<RoleId>> {
-        let mut visited = HashSet::new();
-        let mut visiting = HashSet::new();
-        let mut output = Vec::new();
-        self.expand_from(tenant, root, &mut visited, &mut visiting, &mut output)
-            .await?;
-        Ok(output)
+struct TenantRoleHierarchy<'a, S, C> {
+    engine: &'a Engine<S, C>,
+    tenant: &'a TenantId,
+}
+
+#[async_trait]
+impl<S, C> RoleHierarchy for TenantRoleHierarchy<'_, S, C>
+where
+    S: AuthorizationSource,
+    C: Cache,
+{
+    type Role = RoleId;
+
+    async fn parent_roles(&self, role: &Self::Role) -> Result<Vec<Self::Role>> {
+        self.engine
+            .source
+            .parent_roles(self.tenant, role)
+            .await
+            .map_err(Error::from)
     }
 
-    /// 以显式栈遍历角色继承图，同时检测环和深度限制。
-    async fn expand_from(
-        &self,
-        tenant: &TenantId,
-        root: RoleId,
-        visited: &mut HashSet<RoleId>,
-        visiting: &mut HashSet<RoleId>,
-        output: &mut Vec<RoleId>,
-    ) -> Result<()> {
-        visiting.insert(root.clone());
-        output.push(root.clone());
-        let parents = self.source.parent_roles(tenant, &root).await?;
-        let mut stack: Vec<(RoleId, usize, std::vec::IntoIter<RoleId>)> =
-            vec![(root, 0, parents.into_iter())];
+    fn max_depth(&self) -> usize {
+        self.engine.config.max_role_depth
+    }
 
-        while let Some((current, depth, mut iter)) = stack.pop() {
-            if let Some(parent) = iter.next() {
-                stack.push((current.clone(), depth, iter));
-                let next_depth = depth + 1;
-                if next_depth > self.config.max_role_depth {
-                    return Err(Error::RoleDepthExceeded {
-                        tenant: tenant.clone(),
-                        role: parent,
-                        max_depth: self.config.max_role_depth,
-                    });
-                }
-                if visiting.contains(&parent) {
-                    return Err(Error::RoleCycleDetected {
-                        tenant: tenant.clone(),
-                        role: parent,
-                    });
-                }
-                if visited.contains(&parent) {
-                    continue;
-                }
-
-                let parents = self.source.parent_roles(tenant, &parent).await?;
-                visiting.insert(parent.clone());
-                output.push(parent.clone());
-                stack.push((parent, next_depth, parents.into_iter()));
-                continue;
-            }
-
-            visiting.remove(&current);
-            visited.insert(current);
+    fn cycle_error(&self, role: Self::Role) -> Error {
+        Error::RoleCycleDetected {
+            tenant: self.tenant.clone(),
+            role,
         }
+    }
 
-        Ok(())
+    fn depth_error(&self, role: Self::Role) -> Error {
+        Error::RoleDepthExceeded {
+            tenant: self.tenant.clone(),
+            role,
+            max_depth: self.engine.config.max_role_depth,
+        }
     }
 }
 

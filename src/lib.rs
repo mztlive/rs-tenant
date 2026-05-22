@@ -11,6 +11,8 @@ mod cache;
 mod decision;
 mod engine;
 mod error;
+mod grant;
+mod id;
 mod ids;
 #[cfg(feature = "memory-cache")]
 mod memory_cache;
@@ -21,6 +23,7 @@ mod permission;
 pub mod platform;
 mod request;
 mod role;
+mod role_hierarchy;
 mod scope;
 mod source;
 
