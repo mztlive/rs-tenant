@@ -2,7 +2,7 @@
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](02-domain-model.md) | [下一章](04-quickstart.md)
 
-本章说明 v0.3.0 的三个核心调用如何执行。
+本章说明租户内 `Engine` 和平台 `PlatformEngine` 的核心调用如何执行。未启用 `platform` feature 时，只需要关注租户内流程。
 
 ## `accessible_scope(...)`
 
@@ -124,8 +124,119 @@ pub struct AccessExplanation {
 
 建议每次授权前重新校验 tenant status 和 membership status，避免成员禁用后继续命中过期授权。
 
+## `PlatformEngine::can_platform(...)`
+
+调用：
+
+```rust
+platform_engine
+    .can_platform(PlatformAccessRequest { subject, permission })
+    .await
+```
+
+执行顺序：
+
+1. 读取 `platform_principal_status(subject)`。
+2. 平台主体不是 `Active`：返回 `AccessDecision::Deny`。
+3. 读取 `platform_role_assignments(subject)`。
+4. 没有平台角色分配：返回 `AccessDecision::Deny`。
+5. 按 `PlatformEngineConfig` 展开平台角色继承。
+6. 读取平台角色权限，匹配 `request.permission`。
+7. 只允许命中 `PlatformGrantScope::Platform` 的 assignment。
+8. 命中则 `Allow`，否则 `Deny`。
+
+`AllTenants`、`Tenants`、`TenantPaths` 不会被当作平台自身资源权限。
+
+## `PlatformEngine::accessible_tenants(...)`
+
+调用：
+
+```rust
+platform_engine
+    .accessible_tenants(TenantDataScopeQuery { subject, permission })
+    .await
+```
+
+执行顺序：
+
+1. 读取平台主体状态。
+2. 主体不是 `Active`：返回 `TenantDataAccessScope::None`。
+3. 读取平台角色分配。
+4. 展开平台角色继承。
+5. 读取平台角色权限，匹配 `query.permission`。
+6. 收集权限命中的租户数据范围。
+7. 合并命中范围：
+   - 没有命中：`TenantDataAccessScope::None`
+   - 任一命中是 `AllTenants`：`TenantDataAccessScope::AllTenants`
+   - 命中租户集合：`TenantDataAccessScope::Tenants`
+   - 命中路径集合：`TenantDataAccessScope::TenantPaths`
+   - 同一 permission 同时命中租户集合与路径集合：返回错误；v0.4.0 的 `TenantDataAccessScope` 不表达混合结果。
+
+这个 API 适合平台租户列表、跨租户业务列表、导出等需要把范围下推到业务查询的接口。
+
+## `PlatformEngine::can_access_tenant(...)`
+
+调用：
+
+```rust
+platform_engine
+    .can_access_tenant(TenantDataAccessRequest {
+        subject,
+        permission,
+        tenant,
+    })
+    .await
+```
+
+执行顺序：
+
+1. 按 `request.permission` 调用 `accessible_tenants(...)`。
+2. `TenantDataAccessScope::AllTenants`：返回 `AccessDecision::Allow`。
+3. `TenantDataAccessScope::Tenants` 包含目标租户：返回 `AccessDecision::Allow`。
+4. `TenantDataAccessScope::TenantPaths`：返回 `AccessDecision::Deny`，因为目标路径必需。
+5. `TenantDataAccessScope::None` 或租户不匹配：返回 `AccessDecision::Deny`。
+
+路径级平台授权不会被当成租户级平台授权。
+
+## `PlatformEngine::can_access_tenant_scope(...)`
+
+调用：
+
+```rust
+platform_engine
+    .can_access_tenant_scope(TenantScopedDataAccessRequest {
+        subject,
+        permission,
+        tenant,
+        target,
+    })
+    .await
+```
+
+执行顺序：
+
+1. 按 `request.permission` 调用 `accessible_tenants(...)`。
+2. `TenantDataAccessScope::AllTenants`：返回 `AccessDecision::Allow`。
+3. `TenantDataAccessScope::Tenants` 包含目标租户：返回 `AccessDecision::Allow`。
+4. `TenantDataAccessScope::TenantPaths`：检查目标租户下的 roots 是否覆盖 `target`。
+5. 覆盖则 `Allow`，否则 `Deny`。
+
+平台路径判定复用 `ScopePath` 的相等或祖先路径规则。
+
+## 平台角色继承
+
+当 `PlatformEngineConfig` 开启角色继承时：
+
+- `PlatformEngine` 负责展开父平台角色。
+- 当前 `PlatformRoleAssignment` 的 `PlatformGrantScope` 会沿用到父角色权限。
+- `PlatformEngine` 负责平台角色环检测和最大深度限制。
+- `PlatformAuthorizationSource::platform_parent_roles(...)` 只提供数据，不实现策略。
+
+平台角色继承不参与租户内 `Engine`。
+
 ## 继续阅读
 
 - [上一章：02. 领域模型与权限语义](02-domain-model.md)
 - [下一章：04. 5 分钟快速接入](04-quickstart.md)
+- [11. 平台授权](11-platform-authorization.md)
 - [返回目录](SUMMARY.md)

@@ -42,15 +42,18 @@ assignment scope: GrantScope::Tenant
 
 然后在 `EngineBuilder` 开启 wildcard。这样管理员仍然受 tenant active 和 membership active 约束。
 
-## Q5: v0.3 为什么没有 SuperAdmin？
+## Q5: v0.4 有了 platform，为什么仍然没有 SuperAdmin？
 
-super admin 是绕过策略，不是租户内 RBAC 基础概念。把它放进 core 会模糊平台 super admin、租户 super admin、运维救援三种不同风险面。
+super admin 是绕过策略，不是 RBAC 授权范围。把它放进 core 会模糊平台 super admin、租户 super admin、运维救援三种不同风险面。
 
 推荐：
 
 - 租户内管理员：普通角色 + `GrantScope::Tenant`。
-- 运维救援：应用层显式创建临时 membership / role assignment，并记录审批与审计。
-- 平台超级管理员：应用层平台权限系统处理，未来如有需要也应是独立 feature。
+- 平台后台权限：启用 `platform` feature，用 `PlatformGrantScope::Platform`。
+- 平台跨租户数据管理：启用 `platform` feature，用 `AllTenants`、`Tenants` 或 `TenantPaths` 表达数据范围。
+- 运维救援：应用层记录审批、原因、过期时间和审计日志。
+
+`PlatformGrantScope::AllTenants` 不是全局绕过；它只对某个 `Permission` 表示平台主体的租户数据范围。
 
 ## Q6: 权限更新后为什么行为没变化？
 
@@ -81,6 +84,26 @@ super admin 是绕过策略，不是租户内 RBAC 基础概念。把它放进 c
 - `403`：认证通过，但授权结果是拒绝。
 - `500`：`AuthorizationSource` 或业务数据读取异常。
 
+## Q9: 平台主体能不能直接调用租户内 `Engine`？
+
+不能。租户内 `Engine` 的主体是 `AuthSubject { tenant, principal }`，必须经过 tenant status 和 membership status。平台主体是 `PlatformSubject { principal }`，应交给 `PlatformEngine`。
+
+如果业务确实要让平台客服临时代查某个租户内数据，有两种清晰做法：
+
+1. 启用 `platform` feature，用 `accessible_tenants` 或 `can_access_tenant_scope` 计算平台数据范围。
+2. 不启用 `platform` 时，由应用层显式创建有时效的租户内 membership / role assignment，再按普通 `AuthSubject` 调用租户内 `Engine`。
+
+不要在 `Engine` 外层加“如果是平台用户就直接 allow”的全局分支。
+
+## Q10: `Platform`、`AllTenants`、`Tenants`、`TenantPaths` 有什么区别？
+
+- `Platform`：只访问平台自身资源，例如平台角色管理。
+- `AllTenants`：访问所有租户的数据管理范围。
+- `Tenants`：访问明确租户集合的数据。
+- `TenantPaths`：访问指定租户下指定路径 roots 及其子孙。
+
+`can_platform` 只接受 `Platform`。`can_access_tenant` 不会把 `TenantPaths` 当成租户级权限。`can_access_tenant_scope` 才会检查路径覆盖。
+
 ## 排查日志建议
 
 至少记录：
@@ -95,8 +118,16 @@ super admin 是绕过策略，不是租户内 RBAC 基础概念。把它放进 c
 - engine config：wildcard、role hierarchy、max depth
 - cache hit / miss
 
+平台授权还应记录：
+
+- platform principal
+- platform request kind：`platform_access` / `tenant_data_scope` / `tenant_data_access` / `tenant_scoped_data_access`
+- tenant data access scope
+- platform engine config：wildcard、role hierarchy、max depth
+
 ## 继续阅读
 
 - [上一章：08. 测试与性能基准](08-testing-benchmark.md)
 - [下一章：10. Casbin 边界](10-rs-tenant-vs-casbin.md)
+- [11. 平台授权](11-platform-authorization.md)
 - [返回目录](SUMMARY.md)

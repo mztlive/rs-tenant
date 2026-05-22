@@ -2,7 +2,7 @@
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](04-quickstart.md) | [下一章](06-axum-integration.md)
 
-生产接入的核心是实现 `AuthorizationSource`，然后把 `AccessScope` 下推到业务查询。
+生产接入的核心是实现 `AuthorizationSource`，然后把 `AccessScope` 下推到业务查询。启用 `platform` feature 时，平台授权需要额外实现独立的 `PlatformAuthorizationSource`，并把 `TenantDataAccessScope` 下推到平台业务查询。
 
 ## Step 1: 设计授权数据表
 
@@ -28,7 +28,14 @@
 - membership scope 表。
 - Casbin policy 表作为 core 兼容层。
 
-如果应用层需要平台管理能力，请单独设计平台权限系统；进入 `rs-tenant` 前必须先明确目标租户和租户内主体。
+v0.4.0 的平台管理能力通过 `platform` feature 接入 `PlatformEngine`，但仍不应该复用租户内表来表达平台主体。推荐额外设计平台授权表：
+
+- `platform_principals(id, status)`
+- `platform_role_assignments(principal_id, role_id, scope_kind, tenants, tenant_scope_roots)`
+- `platform_role_permissions(role_id, permission)`
+- `platform_role_inherits(role_id, parent_role_id)`
+
+这些表不需要 `tenant_id` 前导索引，因为平台主体不属于某个租户。
 
 ## Step 2: 实现 `AuthorizationSource`
 
@@ -91,6 +98,62 @@ impl AuthorizationSource for DbAuthorizationSource {
 
 `AuthorizationSource` 只读取授权数据，不实现 wildcard、角色继承、范围合并、路径覆盖等规则。这些确定性规则由领域类型和 Engine 维护。
 
+## Step 2b: 可选实现 `PlatformAuthorizationSource`
+
+启用 `platform` feature 后，平台 Source 仍然只读取授权数据：
+
+```rust
+use async_trait::async_trait;
+use rs_tenant::{
+    platform::{
+        PlatformAuthorizationSource, PlatformPrincipalStatus, PlatformRoleAssignment,
+        PlatformRoleId, PlatformSubject,
+    },
+    Permission, SourceError,
+};
+
+pub struct DbPlatformAuthorizationSource {
+    // 例如数据库连接池
+}
+
+#[async_trait]
+impl PlatformAuthorizationSource for DbPlatformAuthorizationSource {
+    async fn platform_principal_status(
+        &self,
+        subject: &PlatformSubject,
+    ) -> Result<PlatformPrincipalStatus, SourceError> {
+        let _ = subject;
+        todo!()
+    }
+
+    async fn platform_role_assignments(
+        &self,
+        subject: &PlatformSubject,
+    ) -> Result<Vec<PlatformRoleAssignment>, SourceError> {
+        let _ = subject;
+        todo!()
+    }
+
+    async fn platform_role_permissions(
+        &self,
+        role: &PlatformRoleId,
+    ) -> Result<Vec<Permission>, SourceError> {
+        let _ = role;
+        todo!()
+    }
+
+    async fn platform_parent_roles(
+        &self,
+        role: &PlatformRoleId,
+    ) -> Result<Vec<PlatformRoleId>, SourceError> {
+        let _ = role;
+        Ok(vec![])
+    }
+}
+```
+
+`PlatformAuthorizationSource` 不负责创建租户、更新平台角色、绑定平台主体、写审计日志或检查业务数据是否存在。平台角色继承、环检测、最大深度限制由 `PlatformEngine` 负责。
+
 ## Step 3: 构建 Engine
 
 ```rust
@@ -107,6 +170,20 @@ fn build_engine(
         .build()
 }
 ```
+
+平台授权使用 sibling `PlatformEngine`：
+
+```rust
+use rs_tenant::platform::{PlatformEngine, PlatformEngineBuilder};
+
+fn build_platform_engine(
+    source: DbPlatformAuthorizationSource,
+) -> PlatformEngine<DbPlatformAuthorizationSource> {
+    PlatformEngineBuilder::new(source).build()
+}
+```
+
+平台配置项与租户内 `Engine` 独立：`enable_role_hierarchy`、`enable_wildcard`、`max_role_depth`。不要直接复用租户内 `EngineConfig`，避免后续平台配置和租户配置互相牵制。
 
 默认建议：
 
@@ -163,6 +240,41 @@ pub async fn update_order(
 
 业务对象的 `ScopePath` 应来自可信数据，例如订单所属门店、区域或组织树，不建议直接相信客户端传入的路径。
 
+## Step 5b: 平台租户数据查询前过滤
+
+平台列表、导出或跨租户查询应使用 `TenantDataScopeQuery`：
+
+```rust
+use rs_tenant::{
+    platform::{PlatformEngine, PlatformSubject, TenantDataAccessScope, TenantDataScopeQuery},
+    Permission,
+};
+
+pub async fn platform_list_orders(
+    engine: &PlatformEngine<DbPlatformAuthorizationSource>,
+    repo: &OrderRepo,
+    subject: PlatformSubject,
+) -> rs_tenant::Result<Vec<Order>> {
+    let scope = engine
+        .accessible_tenants(TenantDataScopeQuery {
+            subject,
+            permission: Permission::parse("tenant/order:read")?,
+        })
+        .await?;
+
+    match scope {
+        TenantDataAccessScope::None => Ok(vec![]),
+        TenantDataAccessScope::AllTenants => repo.list_all_tenants().await,
+        TenantDataAccessScope::Tenants { tenants } => repo.list_by_tenants(tenants).await,
+        TenantDataAccessScope::TenantPaths { entries } => {
+            repo.list_by_tenant_scope_roots(entries).await
+        }
+    }
+}
+```
+
+`TenantDataAccessScope::AllTenants` 不是全局绕过。它只表示该平台主体对当前 permission 的租户数据范围是所有租户；业务层仍应做分页、审计、操作类型区分和必要的目标存在性检查。
+
 ## Step 6: 缓存失效
 
 权限数据变更后按影响范围失效：
@@ -174,8 +286,11 @@ pub async fn update_order(
 
 正确性要求高于性能。如果 `invalidate_role` 无法精确找到受影响主体，必须退化为 `invalidate_tenant` 或 `invalidate_all`。
 
+平台缓存如果未来启用，cache key 应以 `platform principal + PlatformEngineConfig` 为核心，不应复用租户内 `tenant + principal + config` 的 cache key。
+
 ## 继续阅读
 
 - [上一章：04. 5 分钟快速接入](04-quickstart.md)
 - [下一章：06. Axum 与 JWT 集成](06-axum-integration.md)
+- [11. 平台授权](11-platform-authorization.md)
 - [返回目录](SUMMARY.md)

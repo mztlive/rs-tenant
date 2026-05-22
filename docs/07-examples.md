@@ -2,7 +2,7 @@
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](06-axum-integration.md) | [下一章](08-testing-benchmark.md)
 
-本章用 v0.3.0 API 描述常见授权场景。
+本章用租户内 API 和 v0.4.0 `platform` feature 描述常见授权场景。案例 A-D 是租户内 RBAC 示例，保持 v0.3 语义不变。
 
 ## 案例 A：租户级管理员
 
@@ -147,9 +147,56 @@ assert_eq!(decision, AccessDecision::Deny);
 
 即使主体拥有 `order:read` 的某些路径范围，只要最终不是 `AccessScope::Tenant`，`can_tenant` 就拒绝。
 
-## 案例 E：平台客服代查租户数据
+## 案例 E：平台账号查询可管理租户
 
-v0.3 core 不提供平台主体。应用层需要显式完成映射：
+启用 `memory-store + platform` 后，可以用 `PlatformEngine` 计算平台账号可管理的租户数据范围：
+
+```rust
+use rs_tenant::{
+    platform::{
+        MemoryPlatformSource, PlatformEngineBuilder, PlatformGrantScope, PlatformPrincipalId,
+        PlatformPrincipalStatus, PlatformRoleId, PlatformSubject, TenantDataAccessScope,
+        TenantDataScopeQuery,
+    },
+    Permission, TenantId,
+};
+
+async fn platform_support_can_list_one_tenant() -> rs_tenant::Result<()> {
+    let source = MemoryPlatformSource::new();
+    let subject = PlatformSubject {
+        principal: PlatformPrincipalId::parse("support_1")?,
+    };
+    let role = PlatformRoleId::parse("tenant_support")?;
+
+    source.set_platform_principal_status(
+        subject.principal.clone(),
+        PlatformPrincipalStatus::Active,
+    );
+    source.add_platform_role_assignment(
+        subject.principal.clone(),
+        role.clone(),
+        PlatformGrantScope::tenants(vec![TenantId::parse("tenant_a")?])?,
+    );
+    source.add_platform_role_permission(role, Permission::parse("tenant:read")?);
+
+    let engine = PlatformEngineBuilder::new(source).build();
+    let scope = engine
+        .accessible_tenants(TenantDataScopeQuery {
+            subject,
+            permission: Permission::parse("tenant:read")?,
+        })
+        .await?;
+
+    assert!(matches!(scope, TenantDataAccessScope::Tenants { .. }));
+    Ok(())
+}
+```
+
+业务仓储应把 `TenantDataAccessScope::Tenants` 下推为 `tenant_id IN (...)`。这不是 super admin 绕过，也不会把 `support_1` 变成租户内成员。
+
+## 案例 F：未启用 platform 时的平台客服代查
+
+如果没有启用 v0.4.0 `platform` feature，租户内 core 仍不提供平台主体。应用层需要显式完成映射：
 
 1. 平台权限系统确认客服可以代查目标租户。
 2. 应用创建或选择一个租户内 `PrincipalId`。

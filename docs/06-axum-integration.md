@@ -2,7 +2,7 @@
 
 > 导航：[首页](README.md) | [目录](SUMMARY.md) | [上一章](05-integration-production.md) | [下一章](07-examples.md)
 
-v0.3.0 的 Web 集成只基于租户内上下文：从请求中得到 `AuthSubject`，再调用 `can_tenant`、`can_access_scope` 或 `accessible_scope`。
+租户内 Web 集成基于租户内上下文：从请求中得到 `AuthSubject`，再调用 `can_tenant`、`can_access_scope` 或 `accessible_scope`。启用 v0.4.0 `platform` feature 时，平台后台应单独提取 `PlatformSubject`，再调用 `PlatformEngine`。
 
 ## 集成边界
 
@@ -17,11 +17,17 @@ Web 层可以负责：
 
 Web 层不应该自动推断：
 
-- 平台身份如何映射为租户内主体。
 - super admin 是否绕过 membership。
 - 业务对象的 `ScopePath`。
 
 不同业务的目标路径通常来自数据库关系，而不是 URL 字符串本身。
+
+平台路由不应该复用租户内 `TenantAuthorizeLayer` 来表达平台权限。平台身份应构造 `PlatformSubject`，并根据场景调用：
+
+- `can_platform`：平台自身资源。
+- `accessible_tenants`：跨租户列表或导出。
+- `can_access_tenant`：指定租户级平台操作。
+- `can_access_tenant_scope`：指定租户路径对象。
 
 ## 手动注入 `AuthSubject`
 
@@ -107,7 +113,9 @@ JWT 解析层只应提取：
 - `tenant id`
 - `principal id`
 
-解析后写入 `AuthSubject`。JWT 不负责生成平台授权，不负责解释 super admin，也不负责替业务对象推导范围。
+租户内路由解析后写入 `AuthSubject`。平台路由可以从平台登录态或 JWT 中提取平台 principal，并构造 `PlatformSubject`。
+
+JWT 不负责生成平台授权，不负责解释 super admin，也不负责替业务对象推导范围。
 
 ## 状态码建议
 
@@ -120,4 +128,5 @@ JWT 解析层只应提取：
 
 - [上一章：05. 生产环境集成指南](05-integration-production.md)
 - [下一章：07. 典型案例](07-examples.md)
+- [11. 平台授权](11-platform-authorization.md)
 - [返回目录](SUMMARY.md)

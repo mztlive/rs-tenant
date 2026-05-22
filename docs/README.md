@@ -1,6 +1,8 @@
 # rs-tenant 文档
 
-`rs-tenant` v0.3.0 是一个租户内 RBAC 授权内核。它不托管业务模型，不提供平台级绕过能力，也不实现通用策略语言；它只根据租户、主体、角色分配、权限和授权范围计算访问结果。
+`rs-tenant` v0.4.0 是一个面向 Rust SaaS 系统的 RBAC 授权内核。默认核心仍是 v0.3.0 的租户内授权模型；启用 `platform` feature 后，额外提供 sibling `PlatformEngine` 来处理平台自身权限和平台账号可管理的租户数据范围。
+
+它不托管业务模型，不提供平台级绕过能力，也不实现通用策略语言；它只根据主体、角色分配、权限和授权范围计算访问结果。
 
 ## 快速入口
 
@@ -14,6 +16,7 @@
 - [08. 测试与性能基准](08-testing-benchmark.md)
 - [09. FAQ 与故障排查](09-faq-troubleshooting.md)
 - [10. Casbin 边界](10-rs-tenant-vs-casbin.md)
+- [11. 平台授权](11-platform-authorization.md)
 - [v0.3 重构方案](redesign-v0.3.md)
 - [v0.4 平台授权设计方案](redesign-v0.4.md)
 
@@ -25,7 +28,9 @@
 - 何时调用 `accessible_scope`、`can_access_scope`、`can_tenant`。
 - 如何实现 `AuthorizationSource` 接入生产数据库。
 - 如何使用 `MemorySource` 和 `MemoryCache` 做本地验证与缓存。
+- 如何启用 `platform` feature，使用 `PlatformEngine`、`PlatformSubject`、`PlatformGrantScope` 和 `TenantDataAccessScope`。
 - 为什么 v0.3 删除旧 `authorize/scope/Store/GlobalRole/SuperAdmin/casbin` 兼容层。
+- 为什么 v0.4 平台授权不是 `GlobalRole` 或 `SuperAdmin` 的回归。
 
 ## 推荐阅读路径
 
@@ -43,6 +48,7 @@
 3. [05. 生产环境集成指南](05-integration-production.md)
 4. [08. 测试与性能基准](08-testing-benchmark.md)
 5. [10. Casbin 边界](10-rs-tenant-vs-casbin.md)
-6. [v0.4 平台授权设计方案](redesign-v0.4.md)
+6. [11. 平台授权](11-platform-authorization.md)
+7. [v0.4 平台授权设计方案](redesign-v0.4.md)
 
 完整目录见 [SUMMARY.md](SUMMARY.md)。

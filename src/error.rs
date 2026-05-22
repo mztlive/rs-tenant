@@ -1,4 +1,6 @@
 use crate::ids::{RoleId, TenantId};
+#[cfg(feature = "platform")]
+use crate::platform::PlatformRoleId;
 use thiserror::Error;
 
 /// Authorization source error type.
@@ -32,6 +34,22 @@ pub enum Error {
     RoleDepthExceeded {
         tenant: TenantId,
         role: RoleId,
+        max_depth: usize,
+    },
+    /// Platform role inheritance cycle detected.
+    #[cfg(feature = "platform")]
+    #[error("platform role cycle detected at role {role}")]
+    PlatformRoleCycleDetected {
+        /// Role where the cycle was detected.
+        role: PlatformRoleId,
+    },
+    /// Platform role inheritance depth exceeded.
+    #[cfg(feature = "platform")]
+    #[error("platform role inheritance depth exceeded at role {role}; max depth {max_depth}")]
+    PlatformRoleDepthExceeded {
+        /// Role where the depth limit was exceeded.
+        role: PlatformRoleId,
+        /// Configured maximum inheritance depth.
         max_depth: usize,
     },
 }

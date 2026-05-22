@@ -3,8 +3,10 @@
 //! This crate answers one core question: given a tenant, a principal, and a
 //! permission, what access scope is granted by tenant role assignments?
 //!
-//! v0.3 is a breaking rewrite. The core API is [`Engine::accessible_scope`],
+//! v0.4 keeps the tenant-scoped core API as [`Engine::accessible_scope`],
 //! [`Engine::can_access_scope`], and [`Engine::can_tenant`].
+//! Platform authorization is available behind the `platform` feature through
+//! the sibling [`platform`] module.
 #![forbid(unsafe_code)]
 
 mod cache;
@@ -17,6 +19,8 @@ mod memory_cache;
 #[cfg(feature = "memory-store")]
 mod memory_source;
 mod permission;
+#[cfg(feature = "platform")]
+pub mod platform;
 mod request;
 mod role;
 mod scope;

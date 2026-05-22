@@ -175,8 +175,112 @@ pub enum DenyReason {
 - `AccessDecision` 表示是否允许。
 - `DenyReason` 只用于 explain、测试和日志辅助，不建议作为业务分支的主要输入。
 
+## 平台领域模型
+
+v0.4.0 在 `platform` feature 下新增平台领域模型。它复用 `Permission`、`TenantId`、`ScopePath`、`ScopeRoots`、`AccessDecision` 和 `SourceError`，但不复用租户内主体、角色、Source 或范围结果。
+
+### 平台主体
+
+```rust
+pub struct PlatformPrincipalId(String);
+
+pub struct PlatformSubject {
+    pub principal: PlatformPrincipalId,
+}
+
+pub enum PlatformPrincipalStatus {
+    Active,
+    Inactive,
+}
+```
+
+规则：
+
+- `PlatformSubject` 不携带 `TenantId`。
+- 平台主体不是租户成员，也不会绕过租户内 `membership_status`。
+- 平台主体状态由 `PlatformAuthorizationSource::platform_principal_status` 读取。
+
+### 平台角色
+
+```rust
+pub struct PlatformRoleId(String);
+
+pub struct PlatformRoleAssignment {
+    pub role: PlatformRoleId,
+    pub scope: PlatformGrantScope,
+}
+```
+
+规则：
+
+- `PlatformRoleId` 与租户内 `RoleId` 隔离。
+- 平台角色只服务平台主体。
+- 平台角色不作为租户角色的父角色，也不参与租户内 `Engine` 的角色继承。
+
+### 平台授权范围
+
+```rust
+pub enum PlatformGrantScope {
+    Platform,
+    AllTenants,
+    Tenants(TenantSet),
+    TenantPaths(TenantScopeRoots),
+}
+```
+
+语义：
+
+- `Platform`：只覆盖平台自身资源，例如平台角色管理、权限配置、租户创建入口。
+- `AllTenants`：覆盖所有租户的数据管理范围。
+- `Tenants(TenantSet)`：覆盖明确的租户集合。
+- `TenantPaths(TenantScopeRoots)`：覆盖部分租户内的部分路径。
+
+辅助类型：
+
+```rust
+pub struct TenantSet {
+    tenants: Vec<TenantId>,
+}
+
+pub struct TenantScopedRoots {
+    pub tenant: TenantId,
+    pub roots: ScopeRoots,
+}
+
+pub struct TenantScopeRoots {
+    entries: Vec<TenantScopedRoots>,
+}
+```
+
+规则：
+
+- `TenantSet` 必须非空并去重。
+- `TenantScopeRoots` 必须非空。
+- 同一租户下的 roots 复用 `ScopeRoots` 压缩规则。
+- `AllTenants` 覆盖任意租户和任意租户路径。
+- `Tenants` 覆盖租户级数据，但不表达租户内路径限制。
+- `TenantPaths` 只覆盖给定租户下的给定路径及其子孙。
+
+### 平台授权结果
+
+```rust
+pub enum TenantDataAccessScope {
+    None,
+    AllTenants,
+    Tenants { tenants: Vec<TenantId> },
+    TenantPaths { entries: Vec<TenantScopedRoots> },
+}
+```
+
+`TenantDataAccessScope` 是平台账号管理租户数据时的查询前过滤结果，不是租户内 `AccessScope` 的扩展。业务仓储应把它下推到 SQL、ORM 或搜索条件。
+
+同一 permission 下不要同时授予 `Tenants` 与 `TenantPaths`。v0.4.0 的 `TenantDataAccessScope` 不表达“部分租户全量 + 部分租户路径”的混合结果，`PlatformEngine` 会把这种组合视为无效范围配置。
+
+平台自身资源、指定租户、指定租户路径的点判定仍返回 `AccessDecision`。
+
 ## 继续阅读
 
 - [上一章：01. 项目总览](01-overview.md)
 - [下一章：03. 授权流程详解](03-authorization-flow.md)
+- [11. 平台授权](11-platform-authorization.md)
 - [返回目录](SUMMARY.md)
