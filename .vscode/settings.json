@@ -1,0 +1,20 @@
+{
+  "rust-analyzer.cargo.features": [
+    "memory-store",
+    "memory-cache",
+    "serde",
+    "platform",
+    "axum",
+    "axum-jwt"
+  ],
+  "rust-analyzer.check.features": [
+    "memory-store",
+    "memory-cache",
+    "serde",
+    "platform",
+    "axum",
+    "axum-jwt"
+  ],
+  "rust-analyzer.cargo.allTargets": true,
+  "rust-analyzer.check.allTargets": true
+}
