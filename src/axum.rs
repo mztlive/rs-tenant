@@ -589,16 +589,13 @@ mod tests {
         )
         .subject;
         let role = PlatformRoleId::parse("platform_admin").expect("role");
-        source.set_platform_principal_status(
-            subject.principal.clone(),
-            PlatformPrincipalStatus::Active,
-        );
-        source.add_platform_role_assignment(
+        source.set_principal_status(subject.principal.clone(), PlatformPrincipalStatus::Active);
+        source.add_role_assignment(
             subject.principal.clone(),
             role.clone(),
             PlatformGrantScope::platform(),
         );
-        source.add_platform_role_permission(
+        source.add_role_permission(
             role,
             Permission::parse("platform/role:update").expect("permission"),
         );

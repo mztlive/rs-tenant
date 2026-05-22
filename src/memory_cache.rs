@@ -51,9 +51,9 @@ impl MemoryCache {
 
     /// Overrides shard count for lock sharding.
     pub fn with_shards(mut self, shards: usize) -> Self {
-        let shard_count = Self::normalize_shard_count(self.capacity, shards);
+        let shard_count = Self::normalize_shards(self.capacity, shards);
         self.shards = Arc::new(Self::new_shards(shard_count));
-        self.shard_capacities = Arc::new(Self::distribute_capacity(self.capacity, shard_count));
+        self.shard_capacities = Arc::new(Self::shard_capacities(self.capacity, shard_count));
         self.shard_count = shard_count;
         self
     }
@@ -67,7 +67,7 @@ impl MemoryCache {
     fn build(capacity: usize, shard_count: usize) -> Self {
         Self {
             shards: Arc::new(Self::new_shards(shard_count)),
-            shard_capacities: Arc::new(Self::distribute_capacity(capacity, shard_count)),
+            shard_capacities: Arc::new(Self::shard_capacities(capacity, shard_count)),
             shard_count,
             capacity,
             ttl: None,
@@ -82,10 +82,10 @@ impl MemoryCache {
             .map(|n| n.get())
             .unwrap_or(4)
             .min(MAX_DEFAULT_SHARDS);
-        Self::normalize_shard_count(capacity, cpu_shards)
+        Self::normalize_shards(capacity, cpu_shards)
     }
 
-    fn normalize_shard_count(capacity: usize, requested: usize) -> usize {
+    fn normalize_shards(capacity: usize, requested: usize) -> usize {
         if capacity == 0 {
             return 1;
         }
@@ -98,7 +98,7 @@ impl MemoryCache {
             .collect()
     }
 
-    fn distribute_capacity(capacity: usize, shard_count: usize) -> Vec<usize> {
+    fn shard_capacities(capacity: usize, shard_count: usize) -> Vec<usize> {
         let base = capacity / shard_count;
         let remainder = capacity % shard_count;
         (0..shard_count)
@@ -174,7 +174,7 @@ impl MemoryCache {
         }
     }
 
-    fn invalidate_tenant_inner(state: &mut CacheState, tenant: &TenantId) {
+    fn remove_tenant_entries(state: &mut CacheState, tenant: &TenantId) {
         state.entries.retain(|key, _| &key.tenant != tenant);
         state.order.retain(|key| state.entries.contains_key(key));
     }
@@ -279,7 +279,7 @@ impl Cache for MemoryCache {
     async fn invalidate_tenant(&self, tenant: &TenantId) {
         for shard_index in 0..self.shard_count {
             let mut guard = self.write_shard(shard_index);
-            Self::invalidate_tenant_inner(&mut guard, tenant);
+            Self::remove_tenant_entries(&mut guard, tenant);
         }
     }
 

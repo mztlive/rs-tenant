@@ -41,8 +41,8 @@ impl MemoryPlatformSource {
         Self::default()
     }
 
-    /// Sets platform principal status.
-    pub fn set_platform_principal_status(
+    /// Sets principal status.
+    pub fn set_principal_status(
         &self,
         principal: PlatformPrincipalId,
         status: PlatformPrincipalStatus,
@@ -50,8 +50,8 @@ impl MemoryPlatformSource {
         write_guard(&self.inner.principals).insert(principal, status);
     }
 
-    /// Adds a platform role assignment.
-    pub fn add_platform_role_assignment(
+    /// Adds a role assignment.
+    pub fn add_role_assignment(
         &self,
         principal: PlatformPrincipalId,
         role: PlatformRoleId,
@@ -63,16 +63,16 @@ impl MemoryPlatformSource {
             .push(PlatformRoleAssignment::new(role, scope));
     }
 
-    /// Adds a permission to a platform role.
-    pub fn add_platform_role_permission(&self, role: PlatformRoleId, permission: Permission) {
+    /// Adds a permission to a role.
+    pub fn add_role_permission(&self, role: PlatformRoleId, permission: Permission) {
         write_guard(&self.inner.role_permissions)
             .entry(role)
             .or_default()
             .insert(permission);
     }
 
-    /// Adds a direct parent platform role.
-    pub fn add_platform_parent_role(&self, role: PlatformRoleId, parent: PlatformRoleId) {
+    /// Adds a direct parent role.
+    pub fn add_parent_role(&self, role: PlatformRoleId, parent: PlatformRoleId) {
         write_guard(&self.inner.parent_roles)
             .entry(role)
             .or_default()
@@ -149,7 +149,7 @@ mod tests {
         .join();
 
         let principal = PlatformPrincipalId::parse("platform_admin").expect("principal");
-        source.set_platform_principal_status(principal.clone(), PlatformPrincipalStatus::Active);
+        source.set_principal_status(principal.clone(), PlatformPrincipalStatus::Active);
         let subject = PlatformSubject::new(principal);
         let status = block_on(source.platform_principal_status(&subject)).expect("status");
 

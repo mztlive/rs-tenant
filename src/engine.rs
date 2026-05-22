@@ -124,7 +124,7 @@ where
 
     /// Computes the accessible data scope for a permission.
     pub async fn accessible_scope(&self, query: ScopeQuery) -> Result<AccessScope> {
-        let (scope, _) = self.scope_with_reason(query).await?;
+        let (scope, _) = self.resolve_scope(query).await?;
         Ok(scope)
     }
 
@@ -147,7 +147,7 @@ where
             subject: request.subject,
             permission: request.permission,
         };
-        let (scope, reason) = self.scope_with_reason(query).await?;
+        let (scope, reason) = self.resolve_scope(query).await?;
         let (decision, reason) = match &scope {
             AccessScope::None => (
                 AccessDecision::Deny,
@@ -172,7 +172,7 @@ where
             subject: request.subject,
             permission: request.permission,
         };
-        let (scope, reason) = self.scope_with_reason(query).await?;
+        let (scope, reason) = self.resolve_scope(query).await?;
         let (decision, reason) = match &scope {
             AccessScope::Tenant { .. } => (AccessDecision::Allow, None),
             AccessScope::Paths { .. } => {
@@ -210,10 +210,7 @@ where
         self.cache.invalidate_all().await;
     }
 
-    async fn scope_with_reason(
-        &self,
-        query: ScopeQuery,
-    ) -> Result<(AccessScope, Option<DenyReason>)> {
+    async fn resolve_scope(&self, query: ScopeQuery) -> Result<(AccessScope, Option<DenyReason>)> {
         let tenant = query.subject.tenant.clone();
         if self.source.tenant_status(&tenant).await? != TenantStatus::Active {
             return Ok((AccessScope::None, Some(DenyReason::TenantInactive)));
@@ -281,12 +278,12 @@ where
         let mut visited = HashSet::new();
         let mut visiting = HashSet::new();
         let mut output = Vec::new();
-        self.expand_from_role(tenant, root, &mut visited, &mut visiting, &mut output)
+        self.expand_from(tenant, root, &mut visited, &mut visiting, &mut output)
             .await?;
         Ok(output)
     }
 
-    async fn expand_from_role(
+    async fn expand_from(
         &self,
         tenant: &TenantId,
         root: RoleId,

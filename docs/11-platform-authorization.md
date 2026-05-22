@@ -371,25 +371,25 @@ async fn memory_platform_source_demo() -> rs_tenant::Result<()> {
     let platform_admin = PlatformRoleId::parse("platform_admin")?;
     let tenant_support = PlatformRoleId::parse("tenant_support")?;
 
-    source.set_platform_principal_status(
+    source.set_principal_status(
         subject.principal.clone(),
         PlatformPrincipalStatus::Active,
     );
-    source.add_platform_role_assignment(
+    source.add_role_assignment(
         subject.principal.clone(),
         platform_admin.clone(),
         PlatformGrantScope::Platform,
     );
-    source.add_platform_role_assignment(
+    source.add_role_assignment(
         subject.principal.clone(),
         tenant_support.clone(),
         PlatformGrantScope::tenants(vec![TenantId::parse("tenant_a")?])?,
     );
-    source.add_platform_role_permission(
+    source.add_role_permission(
         platform_admin,
         Permission::parse("platform/role:update")?,
     );
-    source.add_platform_role_permission(tenant_support, Permission::parse("tenant:read")?);
+    source.add_role_permission(tenant_support, Permission::parse("tenant:read")?);
 
     let engine = PlatformEngineBuilder::new(source).build();
 

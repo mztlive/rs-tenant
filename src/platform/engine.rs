@@ -196,12 +196,12 @@ where
         let mut visited = HashSet::new();
         let mut visiting = HashSet::new();
         let mut output = Vec::new();
-        self.expand_from_role(root, &mut visited, &mut visiting, &mut output)
+        self.expand_from(root, &mut visited, &mut visiting, &mut output)
             .await?;
         Ok(output)
     }
 
-    async fn expand_from_role(
+    async fn expand_from(
         &self,
         root: PlatformRoleId,
         visited: &mut HashSet<PlatformRoleId>,
@@ -292,13 +292,9 @@ mod tests {
         let source = MemoryPlatformSource::new();
         let subject = principal();
         let role = role("platform_reader");
-        source.set_platform_principal_status(
-            subject.principal.clone(),
-            PlatformPrincipalStatus::Active,
-        );
-        source.add_platform_role_assignment(subject.principal.clone(), role.clone(), scope);
-        source
-            .add_platform_role_permission(role, Permission::parse(permission).expect("permission"));
+        source.set_principal_status(subject.principal.clone(), PlatformPrincipalStatus::Active);
+        source.add_role_assignment(subject.principal.clone(), role.clone(), scope);
+        source.add_role_permission(role, Permission::parse(permission).expect("permission"));
         (source, subject)
     }
 
@@ -319,10 +315,7 @@ mod tests {
     fn can_platform_should_deny_without_role_assignments() {
         let source = MemoryPlatformSource::new();
         let subject = principal();
-        source.set_platform_principal_status(
-            subject.principal.clone(),
-            PlatformPrincipalStatus::Active,
-        );
+        source.set_principal_status(subject.principal.clone(), PlatformPrincipalStatus::Active);
         let engine = PlatformEngineBuilder::new(source).build();
         let decision = block_on(engine.can_platform(PlatformAccessRequest {
             subject,
@@ -467,22 +460,19 @@ mod tests {
         let role_a = role("tenant_a_reader");
         let role_b = role("tenant_b_reader");
         let permission = Permission::parse("tenant:read").expect("permission");
-        source.set_platform_principal_status(
-            subject.principal.clone(),
-            PlatformPrincipalStatus::Active,
-        );
-        source.add_platform_role_assignment(
+        source.set_principal_status(subject.principal.clone(), PlatformPrincipalStatus::Active);
+        source.add_role_assignment(
             subject.principal.clone(),
             role_a.clone(),
             PlatformGrantScope::tenants(vec![tenant("tenant_a")]).expect("scope"),
         );
-        source.add_platform_role_assignment(
+        source.add_role_assignment(
             subject.principal.clone(),
             role_b.clone(),
             PlatformGrantScope::tenants(vec![tenant("tenant_b")]).expect("scope"),
         );
-        source.add_platform_role_permission(role_a, permission.clone());
-        source.add_platform_role_permission(role_b, permission.clone());
+        source.add_role_permission(role_a, permission.clone());
+        source.add_role_permission(role_b, permission.clone());
         let engine = PlatformEngineBuilder::new(source).build();
         let scope = block_on(engine.accessible_tenants(TenantDataScopeQuery {
             subject,
@@ -505,16 +495,13 @@ mod tests {
         let tenant_role = role("tenant_reader");
         let path_role = role("path_reader");
         let permission = Permission::parse("tenant/order:read").expect("permission");
-        source.set_platform_principal_status(
-            subject.principal.clone(),
-            PlatformPrincipalStatus::Active,
-        );
-        source.add_platform_role_assignment(
+        source.set_principal_status(subject.principal.clone(), PlatformPrincipalStatus::Active);
+        source.add_role_assignment(
             subject.principal.clone(),
             tenant_role.clone(),
             PlatformGrantScope::tenants(vec![tenant("tenant_a")]).expect("scope"),
         );
-        source.add_platform_role_assignment(
+        source.add_role_assignment(
             subject.principal.clone(),
             path_role.clone(),
             PlatformGrantScope::tenant_paths(vec![TenantScopedRoots::new(
@@ -523,8 +510,8 @@ mod tests {
             )])
             .expect("scope"),
         );
-        source.add_platform_role_permission(tenant_role, permission.clone());
-        source.add_platform_role_permission(path_role, permission.clone());
+        source.add_role_permission(tenant_role, permission.clone());
+        source.add_role_permission(path_role, permission.clone());
         let engine = PlatformEngineBuilder::new(source).build();
 
         let err = block_on(engine.accessible_tenants(TenantDataScopeQuery {
@@ -552,17 +539,14 @@ mod tests {
         let subject = principal();
         let child = role("child");
         let parent = role("parent");
-        source.set_platform_principal_status(
-            subject.principal.clone(),
-            PlatformPrincipalStatus::Active,
-        );
-        source.add_platform_role_assignment(
+        source.set_principal_status(subject.principal.clone(), PlatformPrincipalStatus::Active);
+        source.add_role_assignment(
             subject.principal.clone(),
             child.clone(),
             PlatformGrantScope::platform(),
         );
-        source.add_platform_parent_role(child, parent.clone());
-        source.add_platform_role_permission(
+        source.add_parent_role(child, parent.clone());
+        source.add_role_permission(
             parent,
             Permission::parse("platform/role:update").expect("permission"),
         );
@@ -584,17 +568,14 @@ mod tests {
         let subject = principal();
         let child = role("child");
         let parent = role("parent");
-        source.set_platform_principal_status(
-            subject.principal.clone(),
-            PlatformPrincipalStatus::Active,
-        );
-        source.add_platform_role_assignment(
+        source.set_principal_status(subject.principal.clone(), PlatformPrincipalStatus::Active);
+        source.add_role_assignment(
             subject.principal.clone(),
             child.clone(),
             PlatformGrantScope::platform(),
         );
-        source.add_platform_parent_role(child.clone(), parent.clone());
-        source.add_platform_parent_role(parent, child.clone());
+        source.add_parent_role(child.clone(), parent.clone());
+        source.add_parent_role(parent, child.clone());
         let engine = PlatformEngineBuilder::new(source)
             .enable_role_hierarchy(true)
             .build();
@@ -617,17 +598,14 @@ mod tests {
         let child = role("child");
         let parent = role("parent");
         let grandparent = role("grandparent");
-        source.set_platform_principal_status(
-            subject.principal.clone(),
-            PlatformPrincipalStatus::Active,
-        );
-        source.add_platform_role_assignment(
+        source.set_principal_status(subject.principal.clone(), PlatformPrincipalStatus::Active);
+        source.add_role_assignment(
             subject.principal.clone(),
             child.clone(),
             PlatformGrantScope::platform(),
         );
-        source.add_platform_parent_role(child, parent);
-        source.add_platform_parent_role(role("parent"), grandparent.clone());
+        source.add_parent_role(child, parent);
+        source.add_parent_role(role("parent"), grandparent.clone());
         let engine = PlatformEngineBuilder::new(source)
             .enable_role_hierarchy(true)
             .max_role_depth(1)

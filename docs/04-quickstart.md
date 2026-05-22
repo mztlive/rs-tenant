@@ -170,16 +170,16 @@ async fn query_platform_tenant_scope() -> rs_tenant::Result<()> {
     };
     let role = PlatformRoleId::parse("tenant_support")?;
 
-    source.set_platform_principal_status(
+    source.set_principal_status(
         subject.principal.clone(),
         PlatformPrincipalStatus::Active,
     );
-    source.add_platform_role_assignment(
+    source.add_role_assignment(
         subject.principal.clone(),
         role.clone(),
         PlatformGrantScope::tenants(vec![TenantId::parse("tenant_a")?])?,
     );
-    source.add_platform_role_permission(role, Permission::parse("tenant:read")?);
+    source.add_role_permission(role, Permission::parse("tenant:read")?);
 
     let platform_engine = PlatformEngineBuilder::new(source).build();
     let scope = platform_engine
