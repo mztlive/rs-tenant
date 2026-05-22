@@ -146,6 +146,41 @@ mod tests {
     }
 
     #[test]
+    fn memory_platform_source_should_return_configured_authorization_data() {
+        let source = MemoryPlatformSource::new();
+        let principal = PlatformPrincipalId::parse("platform_admin").expect("principal");
+        let role = PlatformRoleId::parse("support").expect("role");
+        let parent = PlatformRoleId::parse("support_parent").expect("role");
+        let permission = Permission::parse("platform/role:read").expect("permission");
+        let subject = PlatformSubject::new(principal.clone());
+
+        source.set_principal_status(principal.clone(), PlatformPrincipalStatus::Active);
+        source.add_role_assignment(principal, role.clone(), PlatformGrantScope::platform());
+        source.add_role_permission(role.clone(), permission.clone());
+        source.add_parent_role(role.clone(), parent.clone());
+
+        assert_eq!(
+            block_on(source.platform_principal_status(&subject)).expect("status"),
+            PlatformPrincipalStatus::Active
+        );
+        assert_eq!(
+            block_on(source.platform_role_assignments(&subject)).expect("assignments"),
+            vec![PlatformRoleAssignment::new(
+                role.clone(),
+                PlatformGrantScope::platform()
+            )]
+        );
+        assert_eq!(
+            block_on(source.platform_role_permissions(&role)).expect("permissions"),
+            vec![permission]
+        );
+        assert_eq!(
+            block_on(source.platform_parent_roles(&role)).expect("parents"),
+            vec![parent]
+        );
+    }
+
+    #[test]
     fn memory_platform_source_should_recover_from_poisoned_lock() {
         let source = MemoryPlatformSource::new();
         let inner = source.inner.clone();

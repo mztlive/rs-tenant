@@ -180,6 +180,49 @@ mod tests {
     }
 
     #[test]
+    fn memory_source_should_return_configured_authorization_data() {
+        let source = MemorySource::new();
+        let tenant = TenantId::parse("tenant_1").expect("tenant");
+        let principal = PrincipalId::parse("user_1").expect("principal");
+        let role = RoleId::parse("reader").expect("role");
+        let parent = RoleId::parse("parent_reader").expect("role");
+        let permission = Permission::parse("invoice:read").expect("permission");
+        let subject = AuthSubject::new(tenant.clone(), principal.clone());
+
+        source.set_tenant_status(tenant.clone(), TenantStatus::Active);
+        source.set_membership_status(tenant.clone(), principal.clone(), MembershipStatus::Active);
+        source.add_role_assignment(
+            tenant.clone(),
+            principal,
+            role.clone(),
+            GrantScope::tenant(),
+        );
+        source.add_role_permission(tenant.clone(), role.clone(), permission.clone());
+        source.add_parent_role(tenant.clone(), role.clone(), parent.clone());
+
+        assert_eq!(
+            block_on(source.tenant_status(&tenant)).expect("status"),
+            TenantStatus::Active
+        );
+        assert_eq!(
+            block_on(source.membership_status(&subject)).expect("status"),
+            MembershipStatus::Active
+        );
+        assert_eq!(
+            block_on(source.role_assignments(&subject)).expect("assignments"),
+            vec![RoleAssignment::new(role.clone(), GrantScope::tenant())]
+        );
+        assert_eq!(
+            block_on(source.role_permissions(&tenant, &role)).expect("permissions"),
+            vec![permission]
+        );
+        assert_eq!(
+            block_on(source.parent_roles(&tenant, &role)).expect("parents"),
+            vec![parent]
+        );
+    }
+
+    #[test]
     fn memory_source_should_recover_from_poisoned_lock() {
         let source = MemorySource::new();
         let inner = source.inner.clone();

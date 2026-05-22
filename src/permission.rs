@@ -232,7 +232,7 @@ impl<'de> serde::Deserialize<'de> for Permission {
 
 #[cfg(test)]
 mod tests {
-    use super::{Permission, Resource};
+    use super::{Action, MAX_PERMISSION_PART_LEN, Permission, Resource};
     use crate::Error;
 
     #[test]
@@ -245,6 +245,24 @@ mod tests {
     fn permission_should_reject_resource_colon() {
         let err = Permission::parse("billing:invoice:read").expect_err("must reject");
         assert!(matches!(err, Error::InvalidPermission(_)));
+    }
+
+    #[test]
+    fn permission_should_reject_missing_separator_and_empty_segments() {
+        for value in ["invoice", "invoice:", ":read", "billing//invoice:read"] {
+            let err = Permission::parse(value).expect_err("must reject");
+            assert!(matches!(err, Error::InvalidPermission(_)));
+        }
+    }
+
+    #[test]
+    fn action_should_reject_slash_and_overlong_values() {
+        let slash_err = Action::parse("read/write").expect_err("must reject");
+        assert!(slash_err.to_string().contains("must not contain '/'"));
+
+        let oversized = "a".repeat(MAX_PERMISSION_PART_LEN + 1);
+        let length_err = Action::parse(oversized).expect_err("must reject");
+        assert!(length_err.to_string().contains("length must be"));
     }
 
     #[test]

@@ -292,7 +292,7 @@ fn compact_paths(roots: Vec<ScopePath>) -> Vec<ScopePath> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccessScope, GrantScope, ScopePath};
+    use super::{AccessScope, GrantScope, MAX_SCOPE_PATH_LEN, ScopePath};
     use crate::TenantId;
 
     #[test]
@@ -302,6 +302,26 @@ mod tests {
 
         assert!(root.allows(&target));
         assert!(!target.allows(&root));
+    }
+
+    #[test]
+    fn scope_path_should_not_allow_prefix_sibling() {
+        let root = ScopePath::parse("agent/1").expect("scope path");
+        let sibling = ScopePath::parse("agent/10/store/456").expect("scope path");
+
+        assert!(!root.allows(&sibling));
+    }
+
+    #[test]
+    fn scope_path_should_reject_invalid_boundaries() {
+        for value in ["", "agent//1", "agent/中文"] {
+            let err = ScopePath::parse(value).expect_err("must reject");
+            assert!(err.to_string().contains("scope path"));
+        }
+
+        let oversized = "a".repeat(MAX_SCOPE_PATH_LEN + 1);
+        let err = ScopePath::parse(oversized).expect_err("must reject");
+        assert!(err.to_string().contains("length must be"));
     }
 
     #[test]

@@ -111,7 +111,7 @@ define_id!(
 
 #[cfg(test)]
 mod tests {
-    use super::{PrincipalId, RoleId, TenantId};
+    use super::{MAX_ID_LEN, PrincipalId, RoleId, TenantId};
 
     #[test]
     fn ids_should_trim_and_validate() {
@@ -129,6 +129,14 @@ mod tests {
     fn ids_should_reject_invalid_characters() {
         let err = RoleId::parse("role/admin").expect_err("must reject");
         assert!(err.to_string().contains("role id"));
+    }
+
+    #[test]
+    fn ids_should_reject_values_over_max_length() {
+        let oversized = "a".repeat(MAX_ID_LEN + 1);
+        let err = TenantId::parse(oversized).expect_err("must reject");
+
+        assert!(err.to_string().contains("length must be"));
     }
 
     #[cfg(feature = "serde")]
