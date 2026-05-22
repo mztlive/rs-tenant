@@ -29,6 +29,9 @@
 
 - [v0.3 重构方案](redesign-v0.3.md)
 - [v0.4 平台授权设计方案](redesign-v0.4.md)
+- [v0.5 Store 与 IAM Service 设计方案](redesign-v0.5.md)
+- [v0.6 权限目录与角色 API 模型设计方案](redesign-v0.6.md)
+- [v0.7 Axum 产品化接入设计方案](redesign-v0.7.md)
 
 ## 接入前你需要准备什么
 
