@@ -15,6 +15,8 @@ Web 层可以负责：
 
 内置 `TenantAuthorizeLayer` 会优先读取 request extension 里的 `AuthContext`，也接受直接注入的 `AuthSubject`。`axum-jwt` 中间件会同时写入这两个 extension，方便业务 handler 用 `Extension<AuthSubject>`。
 
+启用 `axum + platform` feature 时，内置 `PlatformAuthorizeLayer` 会优先读取 request extension 里的 `PlatformAuthContext`，也接受直接注入的 `PlatformSubject`。它只调用 `PlatformEngine::can_platform`，用于平台自身资源路由；跨租户列表、导出和路径对象访问仍应在 handler 中调用 `accessible_tenants`、`can_access_tenant` 或 `can_access_tenant_scope`，再把结果下推到业务查询。
+
 Web 层不应该自动推断：
 
 - super admin 是否绕过 membership。
@@ -71,6 +73,57 @@ async fn update_tenant_settings(
     }
 }
 ```
+
+## 平台自身资源路由
+
+平台角色管理、平台权限配置、租户创建入口等平台自身资源，可以在请求扩展中写入 `PlatformSubject` 或 `PlatformAuthContext`，再使用 `PlatformAuthorizeLayer`：
+
+```rust
+use std::sync::Arc;
+
+use axum::{Router, routing::post};
+use rs_tenant::{
+    Permission,
+    axum::PlatformAuthorizeLayer,
+    platform::{PlatformEngine, PlatformAuthorizationSource},
+};
+
+fn platform_routes<S>(engine: Arc<PlatformEngine<S>>) -> Router
+where
+    S: PlatformAuthorizationSource + 'static,
+{
+    Router::new().route(
+        "/platform/roles",
+        post(create_platform_role).layer(PlatformAuthorizeLayer::new(
+            engine,
+            Permission::parse("platform/role:create").expect("valid permission"),
+        )),
+    )
+}
+```
+
+认证层可以从平台登录态、网关注入头或平台 JWT 中解析平台 principal，并写入：
+
+```rust
+use axum::{body::Body, http::Request, middleware::Next, response::Response};
+use rs_tenant::{
+    axum::PlatformAuthContext,
+    platform::{PlatformPrincipalId, PlatformSubject},
+};
+
+async fn inject_platform_subject(mut req: Request<Body>, next: Next) -> Response {
+    let principal = PlatformPrincipalId::parse("platform_admin").expect("valid principal");
+
+    req.extensions_mut()
+        .insert(PlatformAuthContext::new(principal.clone()));
+    req.extensions_mut()
+        .insert(PlatformSubject::new(principal));
+
+    next.run(req).await
+}
+```
+
+这个 layer 不用于租户数据范围过滤。平台查询租户列表、导出租户数据或读取租户路径对象时，应在 handler 中拿到 `TenantDataAccessScope` 后再组合 SQL、ORM 或搜索条件。
 
 ## 范围级路由
 

@@ -1,4 +1,4 @@
-//! Axum integration utilities for tenant-scoped authorization.
+//! Axum integration utilities for tenant-scoped and platform authorization.
 
 use std::future::poll_fn;
 use std::pin::Pin;
@@ -9,6 +9,11 @@ use crate::cache::Cache;
 use crate::decision::AccessDecision;
 use crate::engine::Engine;
 use crate::permission::Permission;
+#[cfg(feature = "platform")]
+use crate::platform::{
+    PlatformAccessRequest, PlatformAuthorizationSource, PlatformEngine, PlatformPrincipalId,
+    PlatformSubject,
+};
 use crate::request::{AuthSubject, TenantAccessRequest};
 use crate::source::AuthorizationSource;
 use crate::{PrincipalId, ScopePath, ScopedAccessRequest, TenantId};
@@ -30,6 +35,24 @@ impl AuthContext {
     pub fn new(tenant: TenantId, principal: PrincipalId) -> Self {
         Self {
             subject: AuthSubject::new(tenant, principal),
+        }
+    }
+}
+
+/// Platform authentication context extracted from a request.
+#[cfg(feature = "platform")]
+#[derive(Debug, Clone)]
+pub struct PlatformAuthContext {
+    /// Platform-scoped subject.
+    pub subject: PlatformSubject,
+}
+
+#[cfg(feature = "platform")]
+impl PlatformAuthContext {
+    /// Creates a platform auth context.
+    pub fn new(principal: PlatformPrincipalId) -> Self {
+        Self {
+            subject: PlatformSubject::new(principal),
         }
     }
 }
@@ -122,6 +145,99 @@ where
     }
 }
 
+/// Middleware layer that authorizes platform-owned resource requests.
+#[cfg(feature = "platform")]
+#[derive(Debug, Clone)]
+pub struct PlatformAuthorizeLayer<S> {
+    engine: Arc<PlatformEngine<S>>,
+    permission: Permission,
+}
+
+#[cfg(feature = "platform")]
+impl<S> PlatformAuthorizeLayer<S> {
+    /// Creates a new platform authorization layer.
+    pub fn new(engine: Arc<PlatformEngine<S>>, permission: Permission) -> Self {
+        Self { engine, permission }
+    }
+}
+
+#[cfg(feature = "platform")]
+impl<S, Inner> Layer<Inner> for PlatformAuthorizeLayer<S>
+where
+    S: PlatformAuthorizationSource,
+{
+    type Service = PlatformAuthorizeService<Inner, S>;
+
+    fn layer(&self, inner: Inner) -> Self::Service {
+        PlatformAuthorizeService {
+            inner,
+            engine: self.engine.clone(),
+            permission: self.permission.clone(),
+        }
+    }
+}
+
+/// Middleware service that enforces platform-owned resource permission checks.
+#[cfg(feature = "platform")]
+#[derive(Debug, Clone)]
+pub struct PlatformAuthorizeService<Inner, S> {
+    inner: Inner,
+    engine: Arc<PlatformEngine<S>>,
+    permission: Permission,
+}
+
+#[cfg(feature = "platform")]
+impl<Inner, S> Service<Request<Body>> for PlatformAuthorizeService<Inner, S>
+where
+    Inner: Service<Request<Body>, Response = Response> + Clone + Send + 'static,
+    Inner::Future: Send + 'static,
+    S: PlatformAuthorizationSource + 'static,
+{
+    type Response = Response;
+    type Error = Inner::Error;
+    type Future = Pin<Box<dyn std::future::Future<Output = Result<Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: Request<Body>) -> Self::Future {
+        let mut inner = self.inner.clone();
+        let engine = self.engine.clone();
+        let permission = self.permission.clone();
+
+        Box::pin(async move {
+            let subject = req
+                .extensions()
+                .get::<PlatformAuthContext>()
+                .map(|context| context.subject.clone())
+                .or_else(|| req.extensions().get::<PlatformSubject>().cloned());
+            let Some(subject) = subject else {
+                return Ok(
+                    (StatusCode::UNAUTHORIZED, "missing platform auth context").into_response()
+                );
+            };
+
+            match engine
+                .can_platform(PlatformAccessRequest {
+                    subject,
+                    permission,
+                })
+                .await
+            {
+                Ok(AccessDecision::Allow) => {
+                    poll_fn(|cx| inner.poll_ready(cx)).await?;
+                    inner.call(req).await
+                }
+                Ok(AccessDecision::Deny) => {
+                    Ok((StatusCode::FORBIDDEN, "forbidden").into_response())
+                }
+                Err(_) => Ok((StatusCode::INTERNAL_SERVER_ERROR, "auth error").into_response()),
+            }
+        })
+    }
+}
+
 /// Checks a scoped request with an explicit target path.
 pub async fn can_access_scope<S, C>(
     engine: &Engine<S, C>,
@@ -138,6 +254,24 @@ where
             subject,
             permission,
             target,
+        })
+        .await
+}
+
+/// Checks a platform-owned resource request.
+#[cfg(feature = "platform")]
+pub async fn can_platform<S>(
+    engine: &PlatformEngine<S>,
+    subject: PlatformSubject,
+    permission: Permission,
+) -> crate::Result<AccessDecision>
+where
+    S: PlatformAuthorizationSource,
+{
+    engine
+        .can_platform(PlatformAccessRequest {
+            subject,
+            permission,
         })
         .await
 }
@@ -417,5 +551,120 @@ pub mod jwt {
             return Err(AuthError::InvalidAuthorization);
         }
         Ok(token.to_string())
+    }
+}
+
+#[cfg(all(test, feature = "platform", feature = "memory-store"))]
+mod tests {
+    use super::*;
+    use crate::platform::{
+        MemoryPlatformSource, PlatformEngineBuilder, PlatformGrantScope, PlatformPrincipalStatus,
+        PlatformRoleId,
+    };
+    use futures::executor::block_on;
+    use std::convert::Infallible;
+    use std::future::{Ready, ready};
+
+    #[derive(Clone)]
+    struct OkService;
+
+    impl Service<Request<Body>> for OkService {
+        type Response = Response;
+        type Error = Infallible;
+        type Future = Ready<Result<Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: Request<Body>) -> Self::Future {
+            ready(Ok(StatusCode::NO_CONTENT.into_response()))
+        }
+    }
+
+    fn platform_engine() -> (PlatformEngine<MemoryPlatformSource>, PlatformSubject) {
+        let source = MemoryPlatformSource::new();
+        let subject = PlatformAuthContext::new(
+            PlatformPrincipalId::parse("platform_admin").expect("principal"),
+        )
+        .subject;
+        let role = PlatformRoleId::parse("platform_admin").expect("role");
+        source.set_platform_principal_status(
+            subject.principal.clone(),
+            PlatformPrincipalStatus::Active,
+        );
+        source.add_platform_role_assignment(
+            subject.principal.clone(),
+            role.clone(),
+            PlatformGrantScope::platform(),
+        );
+        source.add_platform_role_permission(
+            role,
+            Permission::parse("platform/role:update").expect("permission"),
+        );
+
+        (PlatformEngineBuilder::new(source).build(), subject)
+    }
+
+    #[test]
+    fn platform_authorize_layer_should_allow_platform_subject_extension() {
+        let (engine, subject) = platform_engine();
+        let layer = PlatformAuthorizeLayer::new(
+            Arc::new(engine),
+            Permission::parse("platform/role:update").expect("permission"),
+        );
+        let mut service = layer.layer(OkService);
+        let mut req = Request::new(Body::empty());
+        req.extensions_mut().insert(subject);
+
+        let response = block_on(service.call(req)).expect("response");
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn platform_authorize_layer_should_accept_platform_auth_context() {
+        let (engine, subject) = platform_engine();
+        let layer = PlatformAuthorizeLayer::new(
+            Arc::new(engine),
+            Permission::parse("platform/role:update").expect("permission"),
+        );
+        let mut service = layer.layer(OkService);
+        let mut req = Request::new(Body::empty());
+        req.extensions_mut().insert(PlatformAuthContext { subject });
+
+        let response = block_on(service.call(req)).expect("response");
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn platform_authorize_layer_should_reject_missing_context() {
+        let (engine, _) = platform_engine();
+        let layer = PlatformAuthorizeLayer::new(
+            Arc::new(engine),
+            Permission::parse("platform/role:update").expect("permission"),
+        );
+        let mut service = layer.layer(OkService);
+
+        let response = block_on(service.call(Request::new(Body::empty()))).expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn platform_authorize_layer_should_reject_denied_permission() {
+        let (engine, subject) = platform_engine();
+        let layer = PlatformAuthorizeLayer::new(
+            Arc::new(engine),
+            Permission::parse("platform/role:delete").expect("permission"),
+        );
+        let mut service = layer.layer(OkService);
+        let mut req = Request::new(Body::empty());
+        req.extensions_mut().insert(subject);
+
+        let response = block_on(service.call(req)).expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

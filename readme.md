@@ -55,12 +55,14 @@
 - `PlatformEngine::accessible_tenants(TenantDataScopeQuery)`：查询平台主体可管理的租户数据范围。
 - `PlatformEngine::can_access_tenant(TenantDataAccessRequest)`：判断是否拥有某个租户级数据访问权限。
 - `PlatformEngine::can_access_tenant_scope(TenantScopedDataAccessRequest)`：判断是否可以访问某个租户下的目标路径。
+- `axum + platform` 下的 `PlatformAuthorizeLayer`：为平台自身资源路由执行 `can_platform` 中间件判定。
 
 关键平台类型：
 
 - 主体与角色：`PlatformSubject`、`PlatformPrincipalId`、`PlatformRoleId`、`PlatformRoleAssignment`
 - 范围：`PlatformGrantScope`、`TenantDataAccessScope`、`TenantSet`、`TenantScopeRoots`
 - 数据源：`PlatformAuthorizationSource`
+- Web 集成：`PlatformAuthorizeLayer`、`PlatformAuthContext`
 
 ## 快速示例
 

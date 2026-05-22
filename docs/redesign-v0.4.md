@@ -493,6 +493,8 @@ let decision = platform_engine
 - 评估是否需要独立 `PlatformCache`。
 - 如果引入缓存，cache key 应以 `platform principal + config` 为核心，不复用租户 cache key。
 
+当前实现状态：`axum + platform` 已提供 `PlatformAuthorizeLayer` 和 `PlatformAuthContext`，用于平台自身资源的 `can_platform` 判定。v0.4.0 暂不引入 `PlatformCache`；未来如需缓存，应新增独立平台缓存抽象，不复用租户内 cache key。
+
 ## 14. 测试清单
 
 必须覆盖：

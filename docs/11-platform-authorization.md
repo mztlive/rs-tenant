@@ -433,6 +433,49 @@ async fn memory_platform_source_demo() -> rs_tenant::Result<()> {
 - `TenantDataAccessScope::Tenants { tenants }`：转换为 `tenant_id IN (...)`。
 - `TenantDataAccessScope::TenantPaths { entries }`：转换为按租户分组的 path roots 条件。
 
+## Axum 平台中间件
+
+启用 `axum + platform` feature 时，`rs_tenant::axum` 提供 `PlatformAuthorizeLayer` 和 `PlatformAuthContext`：
+
+```rust
+use std::sync::Arc;
+
+use axum::{Router, routing::post};
+use rs_tenant::{
+    Permission,
+    axum::{PlatformAuthContext, PlatformAuthorizeLayer},
+    platform::{PlatformEngine, PlatformPrincipalId, PlatformSubject},
+};
+
+let principal = PlatformPrincipalId::parse("platform_admin")?;
+let subject = PlatformSubject::new(principal.clone());
+let context = PlatformAuthContext::new(principal);
+
+let router = Router::new().route(
+    "/platform/roles",
+    post(create_platform_role).layer(PlatformAuthorizeLayer::new(
+        Arc::new(platform_engine),
+        Permission::parse("platform/role:create")?,
+    )),
+);
+```
+
+`PlatformAuthorizeLayer` 会从 request extension 中读取 `PlatformAuthContext` 或 `PlatformSubject`，并调用 `PlatformEngine::can_platform`。它只适用于平台自身资源权限，例如平台角色管理、平台权限配置、租户创建入口。
+
+租户数据范围不通过通用 layer 自动下推。平台查询列表、导出或访问具体租户路径对象时，handler 应显式调用 `accessible_tenants`、`can_access_tenant` 或 `can_access_tenant_scope`，再把结果传给业务仓储。
+
+## PlatformCache 评估
+
+v0.4.0 暂不引入独立 `PlatformCache`。当前平台授权路径没有复用租户内 cache key，也没有把平台结果塞进 `MemoryCache`；这避免了 `tenant + principal + config` 与 `platform principal + config` 两套语义混用。
+
+如果未来要缓存平台授权结果，应新增独立缓存抽象，key 至少包含：
+
+- platform principal。
+- `PlatformEngineConfig` 的 role hierarchy、wildcard、max depth。
+- 平台 source 数据版本或应用层可控的失效维度。
+
+缓存内容也应保持平台侧语义：缓存 `PlatformGrantScope` 或合并后的 `TenantDataAccessScope`，不要缓存成租户内 `AccessScope`。
+
 ## 继续阅读
 
 - [上一章：10. Casbin 边界](10-rs-tenant-vs-casbin.md)

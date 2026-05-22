@@ -140,6 +140,7 @@ v0.4.0 新增 `platform` feature：
 - 新增 `PlatformGrantScope`、`TenantSet`、`TenantScopeRoots`、`TenantDataAccessScope`。
 - 新增 `PlatformAuthorizationSource`。
 - 在 `memory-store + platform` 下提供平台内存数据源，用于示例和测试。
+- 在 `axum + platform` 下提供 `PlatformAuthorizeLayer` 和 `PlatformAuthContext`，用于平台自身资源路由授权。
 
 这些新增项不改变 v0.3 租户内 API 的含义。
 
