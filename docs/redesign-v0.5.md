@@ -89,23 +89,28 @@ iam = []
 src/
   iam/
     mod.rs
-    store.rs
-    service.rs
-    source.rs
-    role.rs
-    assignment.rs
-    permission.rs
-    error.rs
+    common/
+      role_record.rs
+      input.rs
+      permission_set.rs
+      assignment_set.rs
+      validation.rs
+      cache_invalidation.rs
+      service_support.rs
+      error.rs
+    tenant/
+      mod.rs
+      store.rs
+      service.rs
+      source.rs
+      api.rs
   platform/
     iam/
       mod.rs
       store.rs
       service.rs
       source.rs
-      role.rs
-      assignment.rs
-      permission.rs
-      error.rs
+      api.rs
 ```
 
 公开导出：
@@ -134,6 +139,38 @@ platform-iam = ["platform", "iam"]
 ```
 
 如果项目只需要租户内授权，不启用 `platform-iam` 时不应感知平台 Store 或平台 service。
+
+### 4.1 复用与抽象边界
+
+租户侧和平台侧不应该复制两套完整实现。它们的 public API 要保持语义隔离，但实现层应抽公共支撑：
+
+| 可复用层 | 说明 |
+|---|---|
+| `iam::common::role_record` | 泛型角色元数据，例如 `RoleRecordBase<R>`，承载 `id/name/description/system/disabled` |
+| `iam::common::input` | 名称 trim、空描述归一、系统角色保护、更新字段归一 |
+| `iam::common::permission_set` | permission 去重、排序稳定、unknown/deprecated 策略挂钩 |
+| `iam::common::assignment_set` | assignment 去重、空列表语义、引用角色存在性校验的公共流程 |
+| `iam::common::validation` | 通用校验 helper，例如非空名称、重复父角色、禁止自继承 |
+| `iam::common::cache_invalidation` | 缓存失效动作建模，但 tenant cache 和 platform cache 使用不同 key |
+| `iam::common::service_support` | CRUD 编排、写入后失效、错误映射的模板函数 |
+| 既有 crate-private helper | 继续复用 `role_hierarchy::expand_roles`、`grant::ScopedGrant`、`ScopeRoots`、`Permission::matches` |
+
+不建议抽成统一 public trait：
+
+```rust
+pub trait GenericIamStore<Subject, Role, Scope> { ... }
+```
+
+原因是这个 trait 会把 `AuthSubject` 和 `PlatformSubject`、`GrantScope` 和 `PlatformGrantScope`、`AccessScope` 和 `TenantDataAccessScope` 混成一组泛型参数。类型看似复用，语义反而更难读，错误也会从“用错入口”变成“泛型约束报错”。
+
+推荐做法是：
+
+- public API 保持 `TenantAuthStore`、`PlatformAuthStore`、`TenantIamService`、`PlatformIamService`。
+- 内部实现使用 `iam::common::*` 的泛型 helper。
+- `tenant::store`、`platform::iam::store` 只定义业务语义不同的读写 trait。
+- `tenant::service`、`platform::iam::service` 只负责把各自 public 类型转换到 common helper，再调用对应 engine。
+
+这样可以复用 60%-70% 的管理层代码，同时保留 v0.4 定下的“平台和租户是 sibling，不是同一个上下文”的边界。
 
 ## 5. 领域模型
 
@@ -646,6 +683,7 @@ let scope = platform_service
 
 - 新增 `iam` feature。
 - 新增 `platform-iam = ["platform", "iam"]` feature。
+- 新增 `iam::common` crate-private 支撑模块，先沉淀通用角色元数据、输入归一、permission/assignment 去重和缓存失效动作。
 - 定义 `RoleRecord`、输入 DTO、错误类型。
 - 定义 `TenantAuthStore`。
 - 定义 `PlatformRoleRecord`、平台输入 DTO、平台错误类型。
@@ -662,10 +700,10 @@ let scope = platform_service
 ### 阶段三：Service
 
 - 实现 `TenantIamService` builder。
-- 实现角色、绑定、权限、继承管理方法。
+- 基于 `iam::common::service_support` 实现角色、绑定、权限、继承管理方法。
 - 实现缓存失效编排。
 - 实现 `PlatformIamService` builder。
-- 实现平台角色、平台绑定、平台权限、平台继承管理方法。
+- 基于同一组 common helper 实现平台角色、平台绑定、平台权限、平台继承管理方法。
 - 实现平台缓存失效编排或预留独立失效接口。
 
 ### 阶段四：内存实现
