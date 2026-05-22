@@ -2,7 +2,7 @@
 
 > 状态：0.7.0 设计草案
 > 目标版本：`0.7.0`
-> 范围：Axum 高层 builder、认证上下文装配、路由授权 guard、手动判定 helper、标准错误响应
+> 范围：租户与平台 Axum 高层 builder、认证上下文装配、路由授权 guard、手动判定 helper、标准错误响应
 > 兼容策略：基于 v0.5 Store/Service 和 v0.6 Catalog，不移除现有低层 Axum API
 
 ## 1. 背景
@@ -17,29 +17,49 @@
 
 但接入体验仍然偏底层。应用项目通常还要自己写：
 
-- JWT claims 到 `AuthSubject` 的映射。
+- JWT claims 到 `AuthSubject` 或 `PlatformSubject` 的映射。
 - tenant/principal 从 header、path、session 中提取的逻辑。
+- platform principal 从 header、path、session 中提取的逻辑。
 - Router 上如何统一挂认证和授权 layer。
 - handler 里如何拿当前 subject。
 - 403/401/500 的统一响应。
 - profile 权限接口。
 - 手动调用 `accessible_scope` 时的样板代码。
 
-v0.7 的目标是让 Axum 接入变成一个产品化 builder：应用只把 Store、JWT 映射和少量业务身份映射接进去，其余都由库装配。
+v0.7 的目标是让 Axum 接入变成产品化 builder：应用只把 Store、JWT 映射和少量业务身份映射接进去，其余都由库装配。租户后台和平台后台都应有对应 builder，而不是只有租户侧高层入口。
 
 ## 2. 目标
 
 v0.7 需要让接入方的 Web 层默认写法接近：
 
 ```rust
-let auth = TenantAuthLayer::builder(iam_service)
+let auth = TenantAxumAuth::builder(iam_service)
     .jwt(jwt_config, claims_mapper)
     .build();
 
 let app = Router::new()
     .route("/orders", get(list_orders).layer(auth.require("order:read")))
     .route("/profile", get(auth_profile))
-    .layer(auth.context());
+    .layer(auth.context_layer());
+```
+
+平台侧默认写法接近：
+
+```rust
+let platform_auth = PlatformAxumAuth::builder(platform_iam_service)
+    .jwt(jwt_config, platform_claims_mapper)
+    .build();
+
+let app = Router::new()
+    .route(
+        "/platform/roles",
+        post(create_platform_role).layer(
+            platform_auth.require_platform("platform/role:create"),
+        ),
+    )
+    .route("/platform/orders", get(list_platform_orders))
+    .nest("/platform/auth", platform_auth.profile_routes())
+    .layer(platform_auth.context_layer());
 ```
 
 目标能力：
@@ -51,6 +71,9 @@ let app = Router::new()
 - 提供手动判定 helper，减少 handler 样板。
 - 提供标准错误类型，允许应用自定义响应转换。
 - 集成 v0.6 catalog，提供 profile 权限和权限目录接口。
+- 提供 `PlatformAxumAuth`。
+- 提供平台 handler helper，支持 `can_platform`、`accessible_tenants`、`can_access_tenant`、`can_access_tenant_scope`。
+- 提供平台 profile 权限和权限目录接口。
 
 ## 3. 非目标
 
@@ -73,6 +96,7 @@ v0.7 不做以下事情：
 axum = ["dep:axum", "dep:http", "dep:tower"]
 axum-jwt = ["axum", "dep:jsonwebtoken", "serde"]
 axum-iam = ["axum", "iam", "catalog"]
+axum-platform-iam = ["axum", "platform-iam", "platform-catalog"]
 ```
 
 模块结构：
@@ -87,6 +111,12 @@ src/
     guard.rs
     profile.rs
     jwt.rs
+  platform/
+    axum.rs
+    context.rs
+    extractor.rs
+    guard.rs
+    profile.rs
 ```
 
 保留现有低层 API：
@@ -395,17 +425,230 @@ pub trait AuthErrorResponseMapper {
 
 ## 13. Platform Axum
 
-v0.7 的重点先是租户内授权。
+平台侧必须有并行高层 builder。它不复用 `TenantAxumAuth`，因为平台主体、平台权限判定入口、跨租户数据范围和 profile 模型都不同。
 
-平台授权可以提供并行 builder：
+核心类型：
 
 ```rust
 pub struct PlatformAxumAuth<S> {
-    engine: Arc<PlatformEngine<S>>,
+    service: Arc<PlatformIamService<S>>,
+    config: PlatformAxumConfig,
+}
+
+impl<S> PlatformAxumAuth<S>
+where
+    S: PlatformAuthStore,
+{
+    pub fn builder(service: PlatformIamService<S>) -> PlatformAxumAuthBuilder<S>;
+
+    pub fn context_layer(&self) -> PlatformAuthContextLayer<S>;
+
+    pub fn require_platform(
+        &self,
+        permission: impl AsRef<str>,
+    ) -> Result<RequirePlatformPermissionLayer<S>>;
+
+    pub fn profile_routes(&self) -> Router;
 }
 ```
 
-但不应阻塞租户内高层接入落地。平台 builder 可作为 v0.7 的后半部分或 v0.8 候选。
+配置：
+
+```rust
+pub struct PlatformAxumConfig {
+    pub expose_error_message: bool,
+    pub fail_closed_on_source_error: bool,
+}
+```
+
+默认值与租户侧一致：
+
+- `expose_error_message = false`
+- `fail_closed_on_source_error = true`
+
+### 13.1 平台认证上下文
+
+平台 context resolver 使用平台主体：
+
+```rust
+#[async_trait]
+pub trait PlatformAuthContextResolver: Send + Sync {
+    async fn resolve<B>(&self, req: &Request<B>) -> Result<PlatformAuthContext, AuthExtractError>;
+}
+
+pub struct PlatformAuthContext {
+    pub subject: PlatformSubject,
+}
+```
+
+JWT 场景下提供平台 claims mapper：
+
+```rust
+pub trait PlatformClaimsMapper<C>: Send + Sync {
+    fn map_claims(&self, claims: &C) -> Result<PlatformAuthContext, AuthExtractError>;
+}
+```
+
+默认 mapper 可以支持：
+
+```json
+{
+  "platform_principal_id": "ops_1"
+}
+```
+
+业务项目如果同一个 token 既可能是租户账号也可能是平台账号，应由应用层明确选择挂 `TenantAxumAuth` 还是 `PlatformAxumAuth`。库不应自动把一个 claims 同时解释成两种主体。
+
+### 13.2 平台 Context Layer
+
+`context_layer` 只负责注入平台上下文，不做权限判定：
+
+```rust
+Router::new()
+    .route("/platform/orders", get(list_platform_orders))
+    .layer(platform_auth.context_layer());
+```
+
+注入内容：
+
+- `PlatformAuthContext`
+- `PlatformSubject`
+- `PlatformIamService<S>` 的 `Arc`
+- 可选 `PlatformSubjectPermissions` 缓存结果
+
+规则：
+
+- 缺少平台认证信息返回 401。
+- token 非法返回 401。
+- 上下文解析成功但权限不足由后续 guard 返回 403。
+- 数据源错误返回 500，默认不暴露内部错误文本。
+
+### 13.3 平台自身资源 Guard
+
+平台自身资源可以直接使用 route layer：
+
+```rust
+Router::new().route(
+    "/platform/roles",
+    post(create_platform_role).layer(
+        platform_auth.require_platform("platform/role:create")?,
+    ),
+)
+```
+
+内部调用：
+
+```rust
+service.can_platform(PlatformAccessRequest { subject, permission }).await
+```
+
+适用场景：
+
+- 平台角色管理。
+- 平台权限配置。
+- 租户创建入口。
+- 平台级配置。
+
+不适用：
+
+- 平台查询跨租户业务列表。
+- 平台更新某个租户下的具体业务对象。
+- 平台导出受租户范围限制的数据。
+
+这些接口需要在 handler 中调用平台 helper，拿到 `TenantDataAccessScope` 后下推到业务查询，或加载对象真实租户和路径后调用 `can_access_tenant_scope`。
+
+### 13.4 平台 Handler Helper
+
+建议提供：
+
+```rust
+pub struct PlatformAuthz<S> {
+    subject: PlatformSubject,
+    service: Arc<PlatformIamService<S>>,
+}
+
+impl<S> PlatformAuthz<S> {
+    pub fn subject(&self) -> &PlatformSubject;
+
+    pub async fn require_platform(
+        &self,
+        permission: impl AsRef<str>,
+    ) -> Result<(), AuthHttpError>;
+
+    pub async fn accessible_tenants(
+        &self,
+        permission: impl AsRef<str>,
+    ) -> Result<TenantDataAccessScope, AuthHttpError>;
+
+    pub async fn require_tenant(
+        &self,
+        permission: impl AsRef<str>,
+        tenant: TenantId,
+    ) -> Result<(), AuthHttpError>;
+
+    pub async fn require_tenant_scope(
+        &self,
+        permission: impl AsRef<str>,
+        tenant: TenantId,
+        target: ScopePath,
+    ) -> Result<(), AuthHttpError>;
+}
+```
+
+跨租户列表：
+
+```rust
+async fn list_platform_orders(
+    PlatformAuthz(authz): PlatformAuthz<AppPlatformStore>,
+) -> Result<Json<Vec<Order>>, AuthHttpError> {
+    let scope = authz.accessible_tenants("tenant/order:read").await?;
+    Ok(Json(repo.list_by_tenant_data_scope(scope).await?))
+}
+```
+
+对象级平台操作：
+
+```rust
+async fn update_tenant_order(
+    PlatformAuthz(authz): PlatformAuthz<AppPlatformStore>,
+    Path(order_id): Path<OrderId>,
+    Json(input): Json<UpdateOrderInput>,
+) -> Result<Json<Order>, AuthHttpError> {
+    let order = repo.load(order_id).await?;
+    authz
+        .require_tenant_scope(
+            "tenant/order:update",
+            order.tenant_id().clone(),
+            order.scope_path(),
+        )
+        .await?;
+
+    let updated = repo.update(order.id, input).await?;
+    Ok(Json(updated))
+}
+```
+
+### 13.5 平台 Profile 和 Catalog 路由
+
+平台侧可提供可选 route：
+
+```rust
+let app = Router::new().nest("/platform/auth", platform_auth.profile_routes());
+```
+
+默认接口：
+
+| 路由 | 方法 | 说明 |
+|---|---|---|
+| `/platform/auth/profile` | `GET` | 当前 platform subject、平台权限列表、权限元数据 |
+| `/platform/auth/permissions` | `GET` | 权限目录，可按平台权限过滤 |
+
+返回模型来自 v0.6：
+
+- `PlatformSubjectPermissions`
+- `PermissionCatalogView`
+
+这些 route 不包含平台员工姓名、手机号、部门等业务 profile 字段。业务系统可以组合自己的平台账号 profile。
 
 ## 14. 接入最终形态
 
@@ -452,9 +695,42 @@ async fn list_orders(Authz(authz): Authz<AppStore, AppCache>) -> Result<Json<Vec
 接入项目保留的工作：
 
 - 实现 `TenantAuthStore`。
+- 实现 `PlatformAuthStore`，如果启用平台后台。
 - 实现 JWT claims 到 `AuthContext` 的映射。
+- 实现 JWT claims 到 `PlatformAuthContext` 的映射。
 - 对业务对象级接口加载真实归属路径。
 - 把 `AccessScope` 下推到业务查询。
+- 把 `TenantDataAccessScope` 下推到平台跨租户查询。
+
+平台侧理想接入代码：
+
+```rust
+let platform_store = AppPlatformAuthStore::new(pool);
+
+let platform_iam = PlatformIamService::builder(platform_store)
+    .permission_catalog(catalog)
+    .engine_config(PlatformEngineConfig {
+        enable_role_hierarchy: true,
+        enable_wildcard: true,
+        max_role_depth: 16,
+    })
+    .build();
+
+let platform_auth = PlatformAxumAuth::builder(platform_iam)
+    .jwt(jwt_state, AppPlatformClaimsMapper)
+    .build();
+
+let app = Router::new()
+    .route(
+        "/platform/roles",
+        post(create_platform_role).layer(
+            platform_auth.require_platform("platform/role:create")?,
+        ),
+    )
+    .route("/platform/orders", get(list_platform_orders))
+    .nest("/platform/auth", platform_auth.profile_routes())
+    .layer(platform_auth.context_layer());
+```
 
 ## 15. 测试清单
 
@@ -472,14 +748,25 @@ async fn list_orders(Authz(authz): Authz<AppStore, AppCache>) -> Result<Json<Vec
 - permission catalog route 返回稳定结构。
 - 自定义 claims mapper 能工作。
 - 默认错误响应不泄漏内部错误。
+- platform context layer 缺少 token 返回 401。
+- platform context layer token 非法返回 401。
+- platform context layer 成功注入 `PlatformAuthContext` 和 `PlatformSubject`。
+- platform require layer 授权成功时进入 handler。
+- platform require layer 权限不足返回 403。
+- `PlatformAuthz::accessible_tenants` 返回正确租户数据范围。
+- `PlatformAuthz::require_tenant_scope` 拒绝越权租户路径。
+- platform profile route 返回当前平台主体权限。
+- platform permission catalog route 能按平台权限用途过滤。
 
 ## 16. 实施阶段
 
 ### 阶段一：高层类型和错误
 
 - 定义 `TenantAxumAuth`。
+- 定义 `PlatformAxumAuth`。
 - 定义 `AuthHttpError`。
 - 定义 `AuthContextResolver`。
+- 定义 `PlatformAuthContextResolver`。
 - 保留现有低层 API。
 
 ### 阶段二：Context Layer
@@ -488,28 +775,40 @@ async fn list_orders(Authz(authz): Authz<AppStore, AppCache>) -> Result<Json<Vec
 - 实现 JWT resolver。
 - 实现 header resolver。
 - 补 401/500 测试。
+- 实现 platform extension 注入。
+- 实现 platform JWT resolver。
+- 实现 platform header resolver。
+- 补平台 401/500 测试。
 
 ### 阶段三：Require Layer 和 Authz
 
 - 实现 `auth.require(permission)`。
 - 实现 `Authz` extractor。
 - 补租户级和对象级授权示例。
+- 实现 `platform_auth.require_platform(permission)`。
+- 实现 `PlatformAuthz` extractor。
+- 补平台自身资源、跨租户列表、租户路径对象授权示例。
 
 ### 阶段四：Profile 和 Catalog Routes
 
 - 集成 v0.6 `SubjectPermissions`。
 - 提供 `/auth/profile` 和 `/auth/permissions`。
 - 文档说明业务 profile 如何组合。
+- 集成 v0.6 `PlatformSubjectPermissions`。
+- 提供 `/platform/auth/profile` 和 `/platform/auth/permissions`。
+- 文档说明平台账号 profile 如何组合。
 
 ### 阶段五：生产示例
 
 - 增加完整 Axum 示例。
 - 示例中只留一个假的 `TenantAuthStore` 实现。
+- 增加完整平台 Axum 示例。
+- 示例中只留一个假的 `PlatformAuthStore` 实现。
 - README 更新为推荐三步接入。
 
 ## 17. 结论
 
-v0.7 的目标是把 Web 接入体验收口：
+v0.7 的目标是把 Web 接入体验收口。租户侧路径是：
 
 ```text
 TenantAuthStore
@@ -524,10 +823,25 @@ TenantAuthStore
               +-- profile/catalog routes
 ```
 
+平台侧路径是：
+
+```text
+PlatformAuthStore
+        |
+        +-- PlatformIamService
+        |
+        +-- PlatformAxumAuth
+              |
+              +-- platform context layer
+              +-- platform require layer
+              +-- PlatformAuthz extractor
+              +-- platform profile/catalog routes
+```
+
 完成后，`rs-tenant` 的推荐使用方式就能贴近最初目标：
 
 1. 实现数据存储 trait。
 2. 在 Axum 中使用中间件。
 3. 在对象级接口里手动调用方法验证权限。
 
-其余角色、权限、绑定、profile、权限目录和缓存失效的通用部分都由库承担。
+其余角色、权限、绑定、profile、权限目录和缓存失效的通用部分都由库承担。平台侧保持和租户侧并行，不把平台员工塞进租户成员，也不把跨租户数据范围伪装成 `AccessScope`。

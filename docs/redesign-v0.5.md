@@ -2,15 +2,16 @@
 
 > 状态：0.5.0 设计草案
 > 目标版本：`0.5.0`
-> 范围：统一存储 trait、角色/绑定/权限管理 service、`AuthorizationSource` 适配、缓存失效编排
+> 范围：统一存储 trait、角色/绑定/权限管理 service、租户与平台 source 适配、缓存失效编排
 > 兼容策略：保留 v0.4 core 和 platform 语义，新增高层管理模块，不破坏现有判定 API
 
 ## 1. 背景
 
-当前 `rs-tenant` 已经可以稳定回答：
+当前 `rs-tenant` 已经可以稳定回答两类问题：
 
 ```text
 tenant + principal + permission -> decision / access scope
+platform principal + permission -> platform decision / tenant data scope
 ```
 
 但业务项目接入时仍然需要自己实现大量 IAM 周边代码：
@@ -25,7 +26,13 @@ tenant + principal + permission -> decision / access scope
 
 这导致接入项目虽然复用了判定内核，但没有明显减少角色管理和绑定管理代码。
 
-v0.5 的目标是补上最关键的一层：让接入方实现一个官方 Store trait，库负责提供通用管理 service，并把同一个 Store 适配给授权判定链路。
+v0.5 的目标是补上最关键的一层：让接入方实现官方 Store trait，库负责提供通用管理 service，并把同一个 Store 适配给授权判定链路。
+
+其中租户侧和平台侧继续沿用 v0.4 的 sibling 边界：
+
+- 租户侧：`TenantAuthStore` -> `TenantIamService` -> `AuthorizationSource` / `Engine`。
+- 平台侧：`PlatformAuthStore` -> `PlatformIamService` -> `PlatformAuthorizationSource` / `PlatformEngine`。
+- 两边共享基础值对象和部分校验模式，但不共享主体、角色、scope、cache key 或写入 service。
 
 ## 2. 目标
 
@@ -36,6 +43,13 @@ v0.5 需要让使用方的默认接入路径变成：
 3. 用 `TenantAuthSource` 或直接由 service 暴露的 source 接入 `Engine`。
 4. 在业务接口中继续使用 `Engine` 的 `can_tenant`、`can_access_scope`、`accessible_scope`。
 
+平台侧默认接入路径变成：
+
+1. 实现 `PlatformAuthStore`。
+2. 用 `PlatformIamService` 做平台角色、平台绑定、平台权限管理。
+3. 用 `PlatformAuthSource` 或直接由 service 暴露的 source 接入 `PlatformEngine`。
+4. 在平台后台接口中继续使用 `PlatformEngine` 的 `can_platform`、`accessible_tenants`、`can_access_tenant`、`can_access_tenant_scope`。
+
 核心目标：
 
 - 提供租户内 IAM 管理的标准数据结构。
@@ -43,6 +57,8 @@ v0.5 需要让使用方的默认接入路径变成：
 - 写入后统一执行缓存失效。
 - 复用现有 `RoleId`、`PrincipalId`、`TenantId`、`Permission`、`GrantScope`、`RoleAssignment`。
 - 让 `AuthorizationSource` 变成 Store 的只读视图，而不是接入方额外手写一套读取逻辑。
+- 提供平台 IAM 管理的并行数据结构，复用 `PlatformRoleId`、`PlatformPrincipalId`、`PlatformGrantScope`、`PlatformRoleAssignment`。
+- 让 `PlatformAuthorizationSource` 也能由平台 Store 只读适配得到。
 
 ## 3. 非目标
 
@@ -54,7 +70,9 @@ v0.5 不做以下事情：
 - 不替应用决定 `AccountKind -> PrincipalId` 的映射。
 - 不处理业务数据归属过滤，例如设备、销售单、耗材归属。
 - 不引入动态策略语言或 Casbin policy 模型。
-- 不把平台授权和租户授权混成一个 Store；平台侧可在后续版本做对应 Store。
+- 不把平台授权和租户授权混成一个 Store。
+- 不把平台主体伪装成租户成员。
+- 不在 `TenantIamService` 中增加平台分支，也不在 `PlatformIamService` 中管理租户内 membership。
 
 ## 4. 模块边界
 
@@ -78,6 +96,16 @@ src/
     assignment.rs
     permission.rs
     error.rs
+  platform/
+    iam/
+      mod.rs
+      store.rs
+      service.rs
+      source.rs
+      role.rs
+      assignment.rs
+      permission.rs
+      error.rs
 ```
 
 公开导出：
@@ -96,6 +124,16 @@ pub mod iam;
 - `GrantScope`：分配级授权范围。
 
 v0.5 的 `iam` 是 core 之上的应用层能力。
+
+`platform/iam` 是 `platform` feature 之上的应用层能力。它可以由组合 feature 暴露：
+
+```toml
+[features]
+iam = []
+platform-iam = ["platform", "iam"]
+```
+
+如果项目只需要租户内授权，不启用 `platform-iam` 时不应感知平台 Store 或平台 service。
 
 ## 5. 领域模型
 
@@ -318,7 +356,149 @@ where
 | `tenant_status` 变更 | 由应用调用 `invalidate_tenant` |
 | `membership_status` 变更 | 由应用调用 `invalidate_principal` |
 
-## 9. 事务边界
+## 9. 平台侧 Store 与 Service
+
+平台侧能力不能复用 `TenantAuthStore`，因为平台主体没有 `TenantId`，平台授权结果也不是 `AccessScope`。v0.5 需要提供并行 Store：
+
+```rust
+#[async_trait]
+pub trait PlatformAuthStore: Send + Sync {
+    async fn platform_principal_status(
+        &self,
+        subject: &PlatformSubject,
+    ) -> Result<PlatformPrincipalStatus, PlatformStoreError>;
+
+    async fn platform_roles(&self) -> Result<Vec<PlatformRoleRecord>, PlatformStoreError>;
+
+    async fn platform_role(
+        &self,
+        role: &PlatformRoleId,
+    ) -> Result<Option<PlatformRoleRecord>, PlatformStoreError>;
+
+    async fn create_platform_role(
+        &self,
+        input: CreatePlatformRoleInput,
+    ) -> Result<PlatformRoleRecord, PlatformStoreError>;
+
+    async fn update_platform_role(
+        &self,
+        input: UpdatePlatformRoleInput,
+    ) -> Result<PlatformRoleRecord, PlatformStoreError>;
+
+    async fn delete_platform_role(
+        &self,
+        role: &PlatformRoleId,
+    ) -> Result<(), PlatformStoreError>;
+
+    async fn platform_role_assignments(
+        &self,
+        subject: &PlatformSubject,
+    ) -> Result<Vec<PlatformRoleAssignment>, PlatformStoreError>;
+
+    async fn set_platform_role_assignments(
+        &self,
+        input: SetPlatformRoleAssignmentsInput,
+    ) -> Result<(), PlatformStoreError>;
+
+    async fn platform_role_permissions(
+        &self,
+        role: &PlatformRoleId,
+    ) -> Result<Vec<Permission>, PlatformStoreError>;
+
+    async fn set_platform_role_permissions(
+        &self,
+        input: SetPlatformRolePermissionsInput,
+    ) -> Result<(), PlatformStoreError>;
+
+    async fn platform_parent_roles(
+        &self,
+        role: &PlatformRoleId,
+    ) -> Result<Vec<PlatformRoleId>, PlatformStoreError>;
+
+    async fn set_platform_parent_roles(
+        &self,
+        role: &PlatformRoleId,
+        parents: Vec<PlatformRoleId>,
+    ) -> Result<(), PlatformStoreError>;
+}
+```
+
+平台角色记录建议与租户角色保持形状相近，但使用平台 ID：
+
+```rust
+pub struct PlatformRoleRecord {
+    pub id: PlatformRoleId,
+    pub name: String,
+    pub description: Option<String>,
+    pub system: bool,
+    pub disabled: bool,
+}
+```
+
+平台 source 适配器：
+
+```rust
+pub struct PlatformAuthSource<S> {
+    store: S,
+}
+
+#[async_trait]
+impl<S> PlatformAuthorizationSource for PlatformAuthSource<S>
+where
+    S: PlatformAuthStore,
+{
+    // 委托到 store 的只读方法
+}
+```
+
+平台 service：
+
+```rust
+pub struct PlatformIamService<S> {
+    store: S,
+    engine: PlatformEngine<PlatformAuthSource<S>>,
+}
+```
+
+核心方法：
+
+```rust
+impl<S> PlatformIamService<S>
+where
+    S: PlatformAuthStore,
+{
+    pub async fn create_role(&self, input: CreatePlatformRoleInput) -> Result<PlatformRoleRecord>;
+    pub async fn update_role(&self, input: UpdatePlatformRoleInput) -> Result<PlatformRoleRecord>;
+    pub async fn delete_role(&self, role: &PlatformRoleId) -> Result<()>;
+
+    pub async fn assign_roles(&self, input: SetPlatformRoleAssignmentsInput) -> Result<()>;
+    pub async fn role_ids(&self, subject: &PlatformSubject) -> Result<Vec<PlatformRoleId>>;
+    pub async fn assignments(&self, subject: &PlatformSubject) -> Result<Vec<PlatformRoleAssignment>>;
+
+    pub async fn set_role_permissions(&self, input: SetPlatformRolePermissionsInput) -> Result<()>;
+    pub async fn permissions(&self, subject: &PlatformSubject) -> Result<Vec<Permission>>;
+
+    pub async fn can_platform(&self, request: PlatformAccessRequest) -> Result<AccessDecision>;
+    pub async fn accessible_tenants(&self, query: TenantDataScopeQuery) -> Result<TenantDataAccessScope>;
+    pub async fn can_access_tenant(&self, request: TenantDataAccessRequest) -> Result<AccessDecision>;
+    pub async fn can_access_tenant_scope(&self, request: TenantScopedDataAccessRequest) -> Result<AccessDecision>;
+}
+```
+
+平台缓存失效必须独立于租户缓存：
+
+| 操作 | 失效策略 |
+|---|---|
+| `assign_roles(subject, ...)` | `invalidate_platform_principal(subject.principal)` |
+| `set_role_permissions(role, ...)` | `invalidate_platform_role(role)` |
+| `set_parent_roles(role, ...)` | `invalidate_platform_all()`，因为平台角色继承影响范围不一定可快速求出 |
+| `update_role(disabled = true)` | `invalidate_platform_role(role)` |
+| `delete_role` | `invalidate_platform_role(role)` |
+| `platform_principal_status` 变更 | 由应用调用 `invalidate_platform_principal` |
+
+如果 v0.5 暂不实现平台缓存，也要在接口命名和文档中预留独立缓存边界，不能复用 `tenant + principal + config` 的 cache key。
+
+## 10. 事务边界
 
 Store trait 不直接定义事务泛型，避免把各种数据库事务类型泄漏到公共 API。
 
@@ -338,7 +518,7 @@ pub trait TransactionalTenantAuthStore {
 
 v0.5 不提前暴露该复杂度。
 
-## 10. 错误模型
+## 11. 错误模型
 
 建议新增：
 
@@ -371,7 +551,7 @@ pub enum IamError {
 - 不要把系统错误伪装成无权限。
 - `NotFound`、`Conflict` 等语义留给 Axum 层映射成 HTTP 状态码。
 
-## 11. 接入示例
+## 12. 接入示例
 
 推荐使用方式：
 
@@ -407,7 +587,38 @@ let source = TenantAuthSource::new(store);
 let engine = EngineBuilder::new(source).build();
 ```
 
-## 12. 测试清单
+平台侧推荐使用方式：
+
+```rust
+let platform_service = PlatformIamService::builder(platform_store)
+    .engine_config(PlatformEngineConfig {
+        enable_role_hierarchy: true,
+        enable_wildcard: true,
+        max_role_depth: 16,
+    })
+    .build();
+
+platform_service
+    .assign_roles(SetPlatformRoleAssignmentsInput {
+        subject: PlatformSubject::new(platform_principal.clone()),
+        assignments: vec![
+            PlatformRoleAssignment::new(
+                platform_role.clone(),
+                PlatformGrantScope::all_tenants(),
+            ),
+        ],
+    })
+    .await?;
+
+let scope = platform_service
+    .accessible_tenants(TenantDataScopeQuery {
+        subject: PlatformSubject::new(platform_principal),
+        permission: Permission::parse("tenant/order:read")?,
+    })
+    .await?;
+```
+
+## 13. 测试清单
 
 必须覆盖：
 
@@ -422,19 +633,29 @@ let engine = EngineBuilder::new(source).build();
 - 重复 assignment 去重。
 - `permissions(subject)` 返回继承后的有效权限。
 - Store 错误不会被转换成 allow。
+- `PlatformAuthSource` 能正确实现 `PlatformAuthorizationSource`。
+- disabled platform role 不参与平台授权。
+- `set_platform_role_permissions` 后失效 platform role cache。
+- `set_platform_parent_roles` 后不影响租户 cache。
+- `PlatformGrantScope::platform()` 不能访问租户数据。
+- `PlatformGrantScope::tenant_paths(...)` 不能被当成租户级全量授权。
 
-## 13. 实施阶段
+## 14. 实施阶段
 
 ### 阶段一：API 草案
 
 - 新增 `iam` feature。
+- 新增 `platform-iam = ["platform", "iam"]` feature。
 - 定义 `RoleRecord`、输入 DTO、错误类型。
 - 定义 `TenantAuthStore`。
+- 定义 `PlatformRoleRecord`、平台输入 DTO、平台错误类型。
+- 定义 `PlatformAuthStore`。
 - 文档中标注这是高层管理模块，不替代 core。
 
 ### 阶段二：Source Adapter
 
 - 实现 `TenantAuthSource<S>`。
+- 实现 `PlatformAuthSource<S>`。
 - 补 adapter 单元测试。
 - 更新生产接入文档，推荐新项目优先实现 Store。
 
@@ -443,21 +664,27 @@ let engine = EngineBuilder::new(source).build();
 - 实现 `TenantIamService` builder。
 - 实现角色、绑定、权限、继承管理方法。
 - 实现缓存失效编排。
+- 实现 `PlatformIamService` builder。
+- 实现平台角色、平台绑定、平台权限、平台继承管理方法。
+- 实现平台缓存失效编排或预留独立失效接口。
 
 ### 阶段四：内存实现
 
 - 可选提供 `MemoryTenantAuthStore`，用于集成测试和示例。
+- 可选提供 `MemoryPlatformAuthStore`，用于集成测试和示例。
 - 不替换现有 `MemorySource`；`MemorySource` 保持 core 示例用途。
+- 不替换现有 `MemoryPlatformSource`；`MemoryPlatformSource` 保持 platform core 示例用途。
 
 ### 阶段五：示例和迁移文档
 
 - 增加“从 `AuthorizationSource` 迁移到 `TenantAuthStore`”章节。
+- 增加“从 `PlatformAuthorizationSource` 迁移到 `PlatformAuthStore`”章节。
 - 增加最小 SQL 表建议。
 - 增加 profile 权限读取示例。
 
-## 14. 结论
+## 15. 结论
 
-v0.5 的重点不是让授权规则更复杂，而是把业务项目最常重复实现的 IAM 管理边界收敛成标准 API。
+v0.5 的重点不是让授权规则更复杂，而是把业务项目最常重复实现的 IAM 管理边界收敛成标准 API。租户侧和平台侧都需要这层能力，但必须保持并行而不是合并。
 
 完成后，新项目的默认路径应该是：
 
@@ -469,6 +696,18 @@ v0.5 的重点不是让授权规则更复杂，而是把业务项目最常重复
         +-- TenantAuthSource 接入 Engine
         |
         +-- 业务代码调用 can_tenant / can_access_scope / accessible_scope
+```
+
+平台侧对应路径是：
+
+```text
+实现 PlatformAuthStore
+        |
+        +-- PlatformIamService 管理平台角色/绑定/权限
+        |
+        +-- PlatformAuthSource 接入 PlatformEngine
+        |
+        +-- 平台代码调用 can_platform / accessible_tenants / can_access_tenant_scope
 ```
 
 这样 `rs-tenant` 才开始从“判定内核”向“可接入框架”迈出第一步。
