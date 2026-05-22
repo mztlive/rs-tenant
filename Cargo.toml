@@ -47,3 +47,26 @@ criterion-bench = ["dep:criterion"]
 name = "criterion_engine"
 harness = false
 required-features = ["criterion-bench", "memory-store", "memory-cache"]
+
+[[example]]
+name = "quickstart"
+required-features = ["memory-store"]
+
+[[example]]
+name = "cache"
+required-features = ["memory-store", "memory-cache"]
+
+[[example]]
+name = "platform"
+required-features = ["memory-store", "platform"]
+
+[[example]]
+name = "production_source"
+
+[[example]]
+name = "axum"
+required-features = ["memory-store", "axum"]
+
+[[example]]
+name = "jwt"
+required-features = ["axum-jwt"]

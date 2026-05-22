@@ -17,6 +17,7 @@
 - [09. FAQ 与故障排查](09-faq-troubleshooting.md)
 - [10. Casbin 边界](10-rs-tenant-vs-casbin.md)
 - [11. 平台授权](11-platform-authorization.md)
+- [12. 性能基线记录](12-perf-baseline.md)
 - [v0.3 重构方案](redesign-v0.3.md)
 - [v0.4 平台授权设计方案](redesign-v0.4.md)
 
@@ -49,6 +50,7 @@
 4. [08. 测试与性能基准](08-testing-benchmark.md)
 5. [10. Casbin 边界](10-rs-tenant-vs-casbin.md)
 6. [11. 平台授权](11-platform-authorization.md)
-7. [v0.4 平台授权设计方案](redesign-v0.4.md)
+7. [12. 性能基线记录](12-perf-baseline.md)
+8. [v0.4 平台授权设计方案](redesign-v0.4.md)
 
 完整目录见 [SUMMARY.md](SUMMARY.md)。

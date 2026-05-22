@@ -12,5 +12,6 @@
 - [09. FAQ 与故障排查](09-faq-troubleshooting.md)
 - [10. Casbin 边界](10-rs-tenant-vs-casbin.md)
 - [11. 平台授权](11-platform-authorization.md)
+- [12. 性能基线记录](12-perf-baseline.md)
 - [v0.3 重构方案](redesign-v0.3.md)
 - [v0.4 平台授权设计方案](redesign-v0.4.md)
